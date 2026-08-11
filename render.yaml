@@ -1,0 +1,97 @@
+# Render Blueprint for the FastAPI backend.
+#
+# Deploy: Render Dashboard → New → Blueprint → point at this repo. Render reads
+# this file and creates the service. Every `sync: false` var is a SECRET or
+# environment-specific value you must fill in via the dashboard — none of them
+# are stored in this repo.
+#
+# The database is NOT defined here: this project uses Neon (external Postgres
+# with pgvector), not Render Postgres. See README "Deploying".
+
+services:
+  - type: web
+    name: notebooklm-rag-api
+    runtime: python
+    plan: free
+    region: oregon
+    rootDir: backend
+    healthCheckPath: /health
+
+    # Install CPU-only torch (see requirements-render.txt), then pre-download
+    # the embedding model during BUILD so it is baked into the image. Without
+    # this, every cold start re-downloads ~90 MB from HuggingFace before the
+    # service can serve traffic.
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements-render.txt
+      python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+
+      # Where sentence-transformers caches the model. Must match between the
+      # build step above and runtime, or the pre-download is wasted.
+      - key: HF_HOME
+        value: /opt/render/project/.cache/huggingface
+
+      # --- Secrets / environment-specific: set these in the dashboard ---
+      # Neon pooler-free connection string, e.g.
+      #   postgresql+psycopg://USER:PASSWORD@ep-xxx.us-east-2.aws.neon.tech/neondb?sslmode=require
+      - key: DATABASE_URL
+        sync: false
+
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # Optional fallback — Groq, OpenAI-API-compatible, genuinely free tier
+      # (no card required, resets daily). Replaced an earlier Kimi/Moonshot AI
+      # attempt at this slot, which needed a paid recharge. Free-tier rate
+      # limits are real (30 RPM / 1K RPD / 12K TPM on the default model) —
+      # fine for a rarely-invoked fallback, not production load.
+      - key: GROQ_API_KEY
+        sync: false
+
+      # Your Vercel origin, e.g. https://notebooklm-rag-gateway.vercel.app
+      # Comma-separated for multiple origins. No trailing slash.
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Optional — enables Google sign-in and per-user notebook isolation.
+      # Must be the SAME OAuth client id the frontend uses (AUTH_GOOGLE_ID).
+      # Leave unset to run without auth (everything owned by `local-dev`).
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+
+      # Optional — enables "search the web" as a way to add sources.
+      # Leave unset to switch the feature off (the UI hides the search box).
+      - key: TAVILY_API_KEY
+        sync: false
+
+      # --- Non-secret tunables (safe to keep in the blueprint) ---
+      - key: ENVIRONMENT
+        value: production
+      - key: GEMINI_PRIMARY_MODEL
+        value: gemini-3.5-flash
+      # 0 disables thinking: ~0.9s to first token instead of ~4.8s.
+      - key: GEMINI_THINKING_BUDGET
+        value: "0"
+      - key: GEMINI_FALLBACK_MODEL
+        value: gemini-3.6-flash
+      # $0 on the free tier (console.groq.com/docs/rate-limits).
+      - key: GROQ_FALLBACK_MODEL
+        value: llama-3.3-70b-versatile
+      - key: LLM_TIMEOUT_SECONDS
+        value: "30"
+      - key: EMBEDDING_MODEL
+        value: all-MiniLM-L6-v2
+      - key: EMBEDDING_DIM
+        value: "384"
+      - key: CHUNK_SIZE_TOKENS
+        value: "500"
+      - key: CHUNK_OVERLAP_TOKENS
+        value: "50"
+      - key: RETRIEVAL_TOP_K
+        value: "5"

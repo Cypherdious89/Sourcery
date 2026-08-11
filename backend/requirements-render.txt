@@ -1,0 +1,13 @@
+# Production install for Render (Linux).
+#
+# Why this file exists: on Linux, `pip install torch` from PyPI pulls the CUDA
+# build and ~2 GB of nvidia-* wheels. That blows past Render's free-tier build
+# limits, and the GPU is useless there anyway. Making PyTorch's CPU index the
+# PRIMARY index (with PyPI as the fallback for everything else) pins the
+# CPU-only wheel, which is a few hundred MB instead.
+#
+# Local macOS dev doesn't need this — use requirements-ingest.txt there.
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+
+-r requirements-ingest.txt

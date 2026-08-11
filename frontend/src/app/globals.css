@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+/* Class-based dark mode: the `dark` class on <html> drives every `dark:`
+   variant. Set by ThemeScript before first paint to avoid a flash. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Semantic tokens rather than raw zinc scales, so a component says what a
+   colour is *for* and both themes stay consistent by construction. Each maps
+   to a Tailwind utility: --color-surface -> bg-surface / text-surface / etc. */
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-inset: var(--inset);
+  --color-line: var(--line);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+  --color-accent-text: var(--accent-text);
+}
+
+:root {
+  --canvas: #fafafa; /* page background */
+  --surface: #ffffff; /* cards, panels */
+  --inset: #fafafa; /* inset rows inside a card */
+  --line: #e4e4e7; /* borders, dividers */
+  --fg: #18181b; /* primary text */
+  --muted: #71717a; /* secondary text */
+  --subtle: #a1a1aa; /* tertiary text, placeholders */
+  --accent: #4f46e5; /* indigo-600 */
+  --accent-fg: #ffffff; /* text on accent */
+  --accent-soft: #eef2ff; /* accent-tinted background */
+  --accent-line: #c7d2fe; /* accent-tinted border */
+  --accent-text: #4338ca; /* accent text on soft background */
+  color-scheme: light;
+
+  /* Stats-page data marks only — never used for chrome. Slots 1-3 of the
+     dataviz skill's reference categorical palette; this order clears every
+     CVD/contrast check all-pairs in both modes (see
+     node scripts/validate_palette.js "#2a78d6,#eb6834,#1baf7a" --pairs all).
+     A 4th category folds into "Other" rather than seating a non-validated hue. */
+  --viz-series-1: #2a78d6; /* blue   — provider/model breakdown, sparklines */
+  --viz-series-2: #eb6834; /* orange */
+  --viz-series-3: #1baf7a; /* aqua   — WARN on light-surface contrast; always paired with a direct label */
+  /* Status palette — fixed, never themed, reserved (never reused as series 4). */
+  --viz-good: #0ca30c;
+  --viz-warning: #fab219;
+  --viz-critical: #d03b3b;
+}
+
+.dark {
+  --canvas: #09090b;
+  --surface: #18181b;
+  --inset: #27272a;
+  --line: #303034;
+  --fg: #f4f4f5;
+  --muted: #a1a1aa;
+  --subtle: #71717a;
+  --accent: #6366f1; /* indigo-500 reads better on dark */
+  --accent-fg: #ffffff;
+  --accent-soft: #1e1b4b;
+  --accent-line: #3730a3;
+  --accent-text: #a5b4fc;
+  color-scheme: dark;
+
+  --viz-series-1: #3987e5;
+  --viz-series-2: #d95926;
+  --viz-series-3: #199e70;
+  --viz-good: #0ca30c;
+  --viz-warning: #fab219;
+  --viz-critical: #d03b3b;
+}
+
+body {
+  background: var(--canvas);
+  color: var(--fg);
+}

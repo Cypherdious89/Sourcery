@@ -1,0 +1,5 @@
+# Test tooling. Install on top of requirements-ingest.txt:
+#   pip install -r requirements-dev.txt
+-r requirements-ingest.txt
+
+pytest>=8.3,<9

@@ -1,0 +1,12 @@
+# Core runtime: web framework, config, DB, migrations.
+# These are all that's needed to serve /health and run Alembic migrations.
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.32,<0.35
+pydantic>=2.9,<3
+pydantic-settings>=2.6,<3
+SQLAlchemy>=2.0,<2.1
+alembic>=1.14,<2
+psycopg[binary]>=3.2,<4
+pgvector>=0.3,<0.4
+python-dotenv>=1.0,<2
+python-multipart>=0.0.12,<0.1
