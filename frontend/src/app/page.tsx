@@ -50,12 +50,13 @@ export default function NotebooksPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    const trimmed = title.trim();
-    if (!trimmed || busy) return;
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      const created = await createNotebook(trimmed);
+      // Blank title is fine — the notebook is created "Untitled" and
+      // auto-renamed once its first source finishes ingesting.
+      const created = await createNotebook(title.trim());
       setNotebooks((cur) => [created, ...cur]);
       setTitle("");
     } catch (err) {
@@ -84,15 +85,11 @@ export default function NotebooksPage() {
           type="text"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          placeholder="New notebook title…"
+          placeholder="New notebook title (optional)…"
           disabled={busy}
           className="min-w-0 flex-1 rounded-lg border border-line bg-surface px-3.5 py-2.5 text-sm text-fg placeholder:text-subtle focus:border-accent focus:outline-none disabled:opacity-50"
         />
-        <Button
-          type="submit"
-          variant="primary"
-          disabled={busy || !title.trim()}
-        >
+        <Button type="submit" variant="primary" disabled={busy}>
           <IconPlus className="h-4 w-4" />
           {busy ? "Creating…" : "Create"}
         </Button>

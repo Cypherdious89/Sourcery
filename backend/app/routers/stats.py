@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import rate_limits
 from app.auth import get_current_user
 from app.db import get_db
 from app.models import LLMCall, LLMCallStatus, Notebook, User
@@ -25,6 +26,7 @@ from app.schemas import (
     ModelStat,
     NotebookStat,
     ProviderStat,
+    RateLimitStat,
     StatsResponse,
     StatusStat,
 )
@@ -148,6 +150,19 @@ def get_stats(
         )
     ]
 
+    # --- LLM rate-limit headroom (account-wide, not scoped to the caller) --
+    rate_limit_stats = [
+        RateLimitStat(
+            provider=u.provider,
+            model=u.model,
+            requests_today=u.requests_today,
+            rpd_limit=u.rpd_limit,
+            requests_this_minute=u.requests_this_minute,
+            rpm_limit=u.rpm_limit,
+        )
+        for u in rate_limits.get_usage_snapshot(db)
+    ]
+
     return StatsResponse(
         total_calls=total_calls,
         total_cost_usd=float(totals.cost or 0),
@@ -163,4 +178,5 @@ def get_stats(
         by_status=by_status,
         daily=daily,
         top_notebooks=top_notebooks,
+        rate_limits=rate_limit_stats,
     )

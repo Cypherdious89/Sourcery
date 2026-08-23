@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import {
   deleteNotebook,
+  exportNotebook,
   getNotebook,
   renameNotebook,
   type Notebook,
@@ -12,7 +13,7 @@ import {
 import { useSources } from "@/lib/useSources";
 import { Button } from "./Button";
 import { ChatPanel } from "./ChatPanel";
-import { IconArrowLeft, IconPencil, IconTrash } from "./icons";
+import { IconArrowLeft, IconDownload, IconPencil, IconTrash } from "./icons";
 import { SourcesPanel } from "./SourcesPanel";
 
 export function NotebookDetail({ notebookId }: { notebookId: string }) {
@@ -22,6 +23,7 @@ export function NotebookDetail({ notebookId }: { notebookId: string }) {
   const sources = useSources(notebookId);
   const router = useRouter();
   const [deleting, setDeleting] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
@@ -63,6 +65,23 @@ export function NotebookDetail({ notebookId }: { notebookId: string }) {
     } catch (e) {
       setNotebook(notebook); // revert on failure
       setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function handleExport() {
+    setExporting(true);
+    try {
+      const { blob, filename } = await exportNotebook(notebookId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -128,11 +147,21 @@ export function NotebookDetail({ notebookId }: { notebookId: string }) {
         <span className="font-mono text-[10px] text-subtle">{notebookId}</span>
 
         <Button
+          variant="secondary"
+          size="sm"
+          disabled={exporting}
+          onClick={handleExport}
+          className="ml-auto"
+        >
+          <IconDownload className="h-3.5 w-3.5" />
+          {exporting ? "Exporting…" : "Export"}
+        </Button>
+
+        <Button
           variant="danger"
           size="sm"
           disabled={deleting}
           onClick={handleDelete}
-          className="ml-auto"
         >
           <IconTrash className="h-3.5 w-3.5" />
           {deleting ? "Deleting…" : "Delete"}

@@ -1,11 +1,22 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { listMessages, streamChat, type ChatResponse } from "@/lib/api";
+import {
+  listMessages,
+  regenerateAnswer,
+  streamChat,
+  type ChatResponse,
+} from "@/lib/api";
 import { useTypewriter } from "@/lib/useTypewriter";
 import { AnswerWithCitations } from "./AnswerWithCitations";
-import { buttonClass } from "./Button";
-import { IconArrowUp, IconSparkles, IconSquare, IconUser } from "./icons";
+import { buttonClass, IconButton } from "./Button";
+import {
+  IconArrowUp,
+  IconRefresh,
+  IconSparkles,
+  IconSquare,
+  IconUser,
+} from "./icons";
 import { TransparencyPanel } from "./TransparencyPanel";
 
 interface UserMessage {
@@ -89,6 +100,9 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  // Message id currently being regenerated, if any — disables its button and
+  // shows a spinner in place of the refresh icon.
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   // Stop needs the latest streamed text without waiting on a state update —
@@ -119,6 +133,7 @@ export function ChatPanel({
                   latency_ms: m.latency_ms ?? 0,
                   cost_usd: m.cost_usd ?? 0,
                   cache_hit: m.cache_hit ?? false,
+                  message_id: m.id,
                 },
           ),
         );
@@ -182,10 +197,12 @@ export function ChatPanel({
           },
           onDone: (result) => {
             // Swap the streaming bubble for the finished message, which also
-            // carries citations and the transparency metadata.
+            // carries citations and the transparency metadata. Prefer the
+            // real persisted id (needed for regenerate) over the synthetic
+            // stamp — only the "no sources yet" canned reply lacks one.
             setMessages((cur) => [
               ...cur,
-              { ...result, id: `a-${stamp}`, role: "assistant" },
+              { ...result, id: result.message_id ?? `a-${stamp}`, role: "assistant" },
             ]);
             setStreamText(null);
           },
@@ -222,6 +239,34 @@ export function ChatPanel({
     }
     setStreamText(null);
     setPending(false);
+  }
+
+  /** Re-run an assistant message's answer in place, bypassing the LLM cache
+   * server-side — a cache hit would just hand back the identical answer. */
+  async function handleRegenerate(messageId: string) {
+    if (regeneratingId) return;
+    setRegeneratingId(messageId);
+    try {
+      const result = await regenerateAnswer(notebookId, messageId);
+      setMessages((cur) =>
+        cur.map((m) =>
+          m.role === "assistant" && m.id === messageId
+            ? { ...result, id: messageId, role: "assistant" }
+            : m,
+        ),
+      );
+    } catch (err) {
+      setMessages((cur) => [
+        ...cur,
+        {
+          id: `e-${Date.now()}`,
+          role: "error",
+          content: err instanceof Error ? err.message : String(err),
+        },
+      ]);
+    } finally {
+      setRegeneratingId(null);
+    }
   }
 
   return (
@@ -296,6 +341,21 @@ export function ChatPanel({
               <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm bg-inset px-3.5 py-2.5 ring-1 ring-inset ring-line">
                 <AnswerWithCitations answer={m.answer} citations={m.citations} />
                 <TransparencyPanel meta={m} />
+                {m.message_id && (
+                  <div className="mt-2 flex justify-end border-t border-line pt-2">
+                    <IconButton
+                      onClick={() => handleRegenerate(m.message_id!)}
+                      disabled={regeneratingId !== null}
+                      aria-label="Regenerate answer"
+                      title="Regenerate answer"
+                      className="!h-6 !w-6 hover:text-accent"
+                    >
+                      <IconRefresh
+                        className={`h-3 w-3 ${regeneratingId === m.message_id ? "animate-spin" : ""}`}
+                      />
+                    </IconButton>
+                  </div>
+                )}
               </div>
             </div>
           );

@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import auth, chat, notebooks, search, sources, stats
+from app.routers import auth, chat, export, notebooks, search, sources, stats
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
@@ -33,6 +33,7 @@ app.include_router(auth.router)
 app.include_router(notebooks.router)
 app.include_router(sources.router)
 app.include_router(chat.router)
+app.include_router(export.router)
 app.include_router(search.router)
 app.include_router(stats.router)
 

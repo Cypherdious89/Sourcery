@@ -21,8 +21,19 @@ from app import embeddings
 from app.chunking import chunk_text
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import Chunk, Source, SourceStatus, SourceType
+from app.models import (
+    UNTITLED_NOTEBOOK_TITLE,
+    Chunk,
+    Notebook,
+    Source,
+    SourceStatus,
+    SourceType,
+)
 from app.parsing import ParseError, parse_docx, parse_pdf, parse_url
+
+# Keeps an auto-derived notebook title from becoming unreasonably long — a
+# verbose page <title> or a long filename shouldn't blow out the UI.
+_MAX_AUTO_TITLE_LEN = 200
 
 logger = logging.getLogger("app.ingestion")
 
@@ -65,6 +76,22 @@ def ingest_source(
             _release_memory_to_os()
 
 
+def _derive_title(
+    source_type: SourceType, original_name_or_url: str, url_title: str | None
+) -> str:
+    """Best-effort notebook title from a source, once it's ready.
+
+    PDFs/DOCXs use their filename (minus extension) — there's nothing richer
+    to go on. URLs prefer the page's own <title>, falling back to the raw URL
+    if trafilatura couldn't find one.
+    """
+    if source_type == SourceType.url:
+        title = (url_title or original_name_or_url).strip()
+    else:
+        title = original_name_or_url.rsplit(".", 1)[0].strip() or original_name_or_url
+    return title[:_MAX_AUTO_TITLE_LEN]
+
+
 def _release_memory_to_os() -> None:
     """Hand freed heap memory back to the OS after a source finishes.
 
@@ -104,6 +131,7 @@ def _ingest_source(
         db.commit()
 
         # 1. Parse -> plain text
+        url_title: str | None = None
         if source_type == SourceType.pdf:
             assert file_bytes is not None
             text = parse_pdf(file_bytes)
@@ -112,7 +140,8 @@ def _ingest_source(
             text = parse_docx(file_bytes)
         elif source_type == SourceType.url:
             assert url is not None
-            text = parse_url(url)
+            parsed_url = parse_url(url)
+            text, url_title = parsed_url.text, parsed_url.title
         else:  # pragma: no cover - guarded by the router
             raise ParseError(f"Unsupported source type: {source_type}")
 
@@ -157,6 +186,16 @@ def _ingest_source(
 
         source.status = SourceStatus.ready
         source.progress = PROGRESS_READY
+
+        # Auto-name a still-untitled notebook from its first source to reach
+        # ready — only fires once, since the title stops matching the
+        # sentinel after this.
+        notebook = db.get(Notebook, notebook_id)
+        if notebook is not None and notebook.title == UNTITLED_NOTEBOOK_TITLE:
+            notebook.title = _derive_title(
+                source_type, source.original_name_or_url, url_title
+            )
+
         db.commit()
         logger.info(
             "ingest_source: source %s ready (%d chunks)", source_id, len(pieces)

@@ -6,6 +6,7 @@ import {
   addUrlSource,
   deleteSource,
   listSources,
+  retrySource,
   type Source,
 } from "./api";
 
@@ -28,6 +29,7 @@ export interface UseSources {
   addUrl: (url: string) => Promise<void>;
   addUrls: (urls: string[]) => Promise<void>;
   removeSource: (sourceId: string) => Promise<void>;
+  retry: (sourceId: string) => Promise<void>;
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -183,6 +185,26 @@ export function useSources(notebookId: string): UseSources {
     [notebookId],
   );
 
+  const retry = useCallback(
+    async (sourceId: string) => {
+      setBusy(true);
+      setError(null);
+      try {
+        const updated = await retrySource(notebookId, sourceId);
+        setSources((cur) => cur.map((s) => (s.id === sourceId ? updated : s)));
+        // Polling may have already stopped if this was the last in-flight
+        // source; bump reloadKey to restart it now that this one is pending
+        // again.
+        setReloadKey((k) => k + 1);
+      } catch (e) {
+        setError(message(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [notebookId],
+  );
+
   return {
     sources,
     loaded,
@@ -195,5 +217,6 @@ export function useSources(notebookId: string): UseSources {
     addUrl,
     addUrls,
     removeSource,
+    retry,
   };
 }

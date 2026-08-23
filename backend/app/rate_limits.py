@@ -80,6 +80,46 @@ def _usage_since(db: Session, provider: str, model: str, since: datetime) -> _Us
     return _Usage(requests=requests or 0, tokens=tokens or 0)
 
 
+@dataclass
+class ModelUsage:
+    """Current usage vs. configured limits for one (provider, model) — the
+    same numbers has_headroom checks, surfaced for display (see GET /stats).
+    """
+
+    provider: str
+    model: str
+    requests_today: int
+    rpd_limit: int | None
+    requests_this_minute: int
+    rpm_limit: int | None
+
+
+def get_usage_snapshot(db: Session) -> list[ModelUsage]:
+    """Usage snapshot for every model in the fallback chain.
+
+    Account-wide, not scoped to the caller — the quota itself is shared
+    across every user of this deployment, so anyone signed in needs to see
+    the same real ceiling, not just their own slice of it.
+    """
+    now = datetime.now(timezone.utc)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    out = []
+    for (provider, model), limit in LIMITS.items():
+        day = _usage_since(db, provider, model, midnight)
+        minute = _usage_since(db, provider, model, now - timedelta(seconds=60))
+        out.append(
+            ModelUsage(
+                provider=provider,
+                model=model,
+                requests_today=day.requests,
+                rpd_limit=limit.rpd,
+                requests_this_minute=minute.requests,
+                rpm_limit=limit.rpm,
+            )
+        )
+    return out
+
+
 def has_headroom(db: Session, provider: str, model: str) -> bool:
     """Whether (provider, model) has quota left, based on logged usage.
 

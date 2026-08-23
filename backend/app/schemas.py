@@ -12,7 +12,9 @@ from app.models import MessageRole, SourceStatus, SourceType
 
 # --- Notebooks ---
 class NotebookCreate(BaseModel):
-    title: str
+    # Optional — omit or send blank to get UNTITLED_NOTEBOOK_TITLE, which
+    # ingestion then replaces with a name derived from the first source.
+    title: str | None = None
 
 
 class NotebookUpdate(BaseModel):
@@ -100,6 +102,11 @@ class ChatResponse(BaseModel):
     latency_ms: int
     cost_usd: float
     cache_hit: bool
+    # The persisted assistant ChatMessage id — None only for the "no sources
+    # yet" canned reply, which isn't grounded in anything worth regenerating.
+    # Lets the frontend call the regenerate endpoint on a message it just
+    # streamed, not only ones reloaded from GET /messages.
+    message_id: uuid.UUID | None = None
 
 
 # --- Gateway stats (aggregate dashboard) ---
@@ -134,6 +141,19 @@ class NotebookStat(BaseModel):
     cost_usd: float
 
 
+class RateLimitStat(BaseModel):
+    """Current usage vs. each chain model's free-tier quota — see
+    app/rate_limits.py. Account-wide, not scoped to the caller: the quota
+    itself is shared across every user of this deployment."""
+
+    provider: str
+    model: str
+    requests_today: int
+    rpd_limit: int | None
+    requests_this_minute: int
+    rpm_limit: int | None
+
+
 class StatsResponse(BaseModel):
     """Aggregated across every llm_calls row for the caller's own notebooks.
 
@@ -156,6 +176,7 @@ class StatsResponse(BaseModel):
     by_status: list[StatusStat]
     daily: list[DailyStat]
     top_notebooks: list[NotebookStat]
+    rate_limits: list[RateLimitStat]
 
 
 class MessageOut(BaseModel):

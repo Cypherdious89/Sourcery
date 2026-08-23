@@ -4,7 +4,13 @@ import { useRef, useState } from "react";
 import type { Source } from "@/lib/api";
 import type { UseSources } from "@/lib/useSources";
 import { buttonClass, IconButton } from "./Button";
-import { IconFileText, IconLoader, IconTrash, IconUpload } from "./icons";
+import {
+  IconFileText,
+  IconLoader,
+  IconRefresh,
+  IconTrash,
+  IconUpload,
+} from "./icons";
 import { StatusBadge } from "./StatusBadge";
 import { WebSearchPanel } from "./WebSearchPanel";
 
@@ -26,6 +32,7 @@ export function SourcesPanel({ state }: { state: UseSources }) {
     addUrl,
     addUrls,
     removeSource,
+    retry,
   } = state;
   // URL-type sources store the URL in original_name_or_url, so search results
   // can be marked as already added.
@@ -163,7 +170,9 @@ export function SourcesPanel({ state }: { state: UseSources }) {
               </span>
               {s.status === "failed" && (
                 <span className="mt-0.5 block text-[10px] text-red-600 dark:text-red-400">
-                  Ingestion failed — check the backend logs.
+                  {s.type === "url"
+                    ? "Ingestion failed — retry, or check the backend logs."
+                    : "Ingestion failed — delete and re-upload the file."}
                 </span>
               )}
               {s.status === "processing" && s.progress > 0 && (
@@ -182,6 +191,17 @@ export function SourcesPanel({ state }: { state: UseSources }) {
               )}
             </span>
             <StatusBadge status={s.status} progress={s.progress} />
+            {s.status === "failed" && s.type === "url" && (
+              <IconButton
+                onClick={() => retry(s.id)}
+                disabled={busy}
+                aria-label={`Retry ${s.original_name_or_url}`}
+                title="Retry ingestion"
+                className="hover:text-accent"
+              >
+                <IconRefresh className="h-3.5 w-3.5" />
+              </IconButton>
+            )}
             <IconButton
               onClick={() => removeSource(s.id)}
               disabled={busy}

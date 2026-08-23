@@ -118,6 +118,15 @@ class User(Base):
     notebooks: Mapped[list[Notebook]] = relationship(back_populates="user")
 
 
+# Sentinel title assigned when a notebook is created without one. Ingestion
+# checks for exactly this string before auto-naming from the first source
+# (see app/ingestion.py). Not a separate boolean flag — the rare case of a
+# user manually renaming a notebook to literally "Untitled" would also get
+# overwritten by the next source, which is an acceptable trade-off for not
+# adding a schema column just to disambiguate it.
+UNTITLED_NOTEBOOK_TITLE = "Untitled"
+
+
 class Notebook(Base):
     __tablename__ = "notebooks"
 

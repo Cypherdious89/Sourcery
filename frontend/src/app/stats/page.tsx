@@ -115,6 +115,53 @@ export default function StatsPage() {
 
       {stats && (
         <div className="mt-8 space-y-6">
+          <Card
+            title="LLM rate limits"
+            subtitle="Requests used today, per model in the fallback chain — shared account-wide, not per user"
+          >
+            <div className="space-y-3">
+              {stats.rate_limits.map((r) => {
+                const pct =
+                  r.rpd_limit != null
+                    ? Math.min(
+                        100,
+                        Math.max(4, (r.requests_today / r.rpd_limit) * 100),
+                      )
+                    : 0;
+                const exhausted =
+                  r.rpd_limit != null && r.requests_today >= r.rpd_limit;
+                return (
+                  <div key={`${r.provider}:${r.model}`}>
+                    <div className="mb-1 flex items-baseline justify-between gap-2 text-xs">
+                      <span className="truncate font-medium text-fg">
+                        {r.model}
+                      </span>
+                      <span
+                        className={`shrink-0 font-mono ${exhausted ? "text-red-600 dark:text-red-400" : "text-subtle"}`}
+                      >
+                        {r.requests_today}
+                        {r.rpd_limit != null ? `/${r.rpd_limit}` : ""} today
+                        {r.rpm_limit != null &&
+                          ` · ${r.requests_this_minute}/${r.rpm_limit} this min`}
+                      </span>
+                    </div>
+                    <div className="h-4 overflow-hidden rounded bg-inset">
+                      <div
+                        className="h-full rounded-r"
+                        style={{
+                          width: `${pct}%`,
+                          backgroundColor: exhausted
+                            ? "var(--viz-negative, #ef4444)"
+                            : "var(--viz-series-1)",
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+
           {stats.total_calls === 0 ? (
             <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-line py-16 text-center">
               <span className="flex h-10 w-10 items-center justify-center rounded-full bg-inset text-subtle">

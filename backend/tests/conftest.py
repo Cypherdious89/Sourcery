@@ -48,10 +48,13 @@ def fake_embeddings(monkeypatch):
     guarantee even though production embeddings now call a hosted API."""
     from app import embeddings
 
+    def fake_embed_texts(texts, *, on_batch=None):
+        if on_batch is not None:
+            on_batch(1, 1)
+        return [_fake_embed_one(t) for t in texts]
+
     monkeypatch.setattr(embeddings, "embed_text", _fake_embed_one)
-    monkeypatch.setattr(
-        embeddings, "embed_texts", lambda texts: [_fake_embed_one(t) for t in texts]
-    )
+    monkeypatch.setattr(embeddings, "embed_texts", fake_embed_texts)
 
 
 @pytest.fixture

@@ -174,3 +174,52 @@ def delete_source(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Source not found")
     db.delete(source)
     db.commit()
+
+
+@router.post(
+    "/{notebook_id}/sources/{source_id}/retry",
+    response_model=SourceOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_source(
+    notebook_id: uuid.UUID,
+    source_id: uuid.UUID,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Source:
+    """Re-run ingestion for a failed source.
+
+    Only ``url`` sources can be retried this way: their URL is stored, so
+    re-fetching is just re-running the same pipeline. Uploaded files' bytes
+    are never persisted past the original request (no blob storage in this
+    app), so there's nothing to re-parse — those need a fresh upload instead.
+    """
+    owned_notebook(notebook_id, db, user)
+    source = db.get(Source, source_id)
+    if source is None or source.notebook_id != notebook_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Source not found")
+    if source.status != SourceStatus.failed:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Only a failed source can be retried"
+        )
+    if source.type != SourceType.url:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Uploaded files aren't kept after ingestion — delete this source "
+            "and upload the file again instead of retrying",
+        )
+
+    source.status = SourceStatus.pending
+    source.progress = 0
+    db.commit()
+    db.refresh(source)
+
+    background.add_task(
+        ingest_source,
+        source.id,
+        notebook_id,
+        source.type,
+        url=source.original_name_or_url,
+    )
+    return source

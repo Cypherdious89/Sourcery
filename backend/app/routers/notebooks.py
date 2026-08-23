@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.db import get_db
-from app.models import Notebook, User
+from app.models import UNTITLED_NOTEBOOK_TITLE, Notebook, User
 from app.schemas import NotebookCreate, NotebookOut, NotebookUpdate
 
 router = APIRouter(prefix="/notebooks", tags=["notebooks"])
@@ -32,11 +32,12 @@ def owned_notebook(
 
 @router.post("", response_model=NotebookOut, status_code=status.HTTP_201_CREATED)
 def create_notebook(
-    payload: NotebookCreate,
+    payload: NotebookCreate = NotebookCreate(),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Notebook:
-    notebook = Notebook(title=payload.title, user_id=user.id)
+    title = (payload.title or "").strip() or UNTITLED_NOTEBOOK_TITLE
+    notebook = Notebook(title=title, user_id=user.id)
     db.add(notebook)
     db.commit()
     db.refresh(notebook)

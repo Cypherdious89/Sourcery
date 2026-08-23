@@ -15,6 +15,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -152,6 +153,7 @@ def chat(
             latency_ms=0,
             cost_usd=0.0,
             cache_hit=False,
+            message_id=None,
         )
 
     # 3. Build the grounded prompt with [S1], [S2], ... markers.
@@ -208,6 +210,7 @@ def chat(
         latency_ms=result.latency_ms,
         cost_usd=float(result.cost_usd or 0.0),
         cache_hit=result.cache_hit,
+        message_id=assistant_msg.id,
     )
 
 
@@ -276,6 +279,7 @@ def chat_stream(
                     latency_ms=0,
                     cost_usd=0.0,
                     cache_hit=False,
+                    message_id=None,
                 ).model_dump(mode="json"),
             )
             return
@@ -321,6 +325,7 @@ def chat_stream(
                         latency_ms=result.latency_ms,
                         cost_usd=float(result.cost_usd or 0.0),
                         cache_hit=result.cache_hit,
+                        message_id=assistant_msg.id,
                     ).model_dump(mode="json"),
                 )
         except gateway.GatewayError as exc:
@@ -341,6 +346,134 @@ def chat_stream(
             # Stops nginx/Render from buffering the stream into one blob.
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+def _history_before(
+    db: Session, notebook_id: uuid.UUID, before: datetime, limit: int
+) -> list[tuple[str, str]]:
+    """Same as _recent_history, but scoped to messages strictly before a
+    given timestamp — regenerate replays exactly the context that was
+    available when the original answer was first generated, not whatever
+    the transcript looks like now."""
+    if limit <= 0:
+        return []
+    rows = list(
+        db.scalars(
+            select(ChatMessage)
+            .where(
+                ChatMessage.notebook_id == notebook_id,
+                ChatMessage.created_at < before,
+            )
+            .order_by(ChatMessage.created_at.desc())
+            .limit(limit)
+        )
+    )
+    return [(m.role.value, m.content) for m in reversed(rows)]
+
+
+@router.post(
+    "/{notebook_id}/messages/{message_id}/regenerate", response_model=ChatResponse
+)
+def regenerate_message(
+    notebook_id: uuid.UUID,
+    message_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ChatResponse:
+    """Re-run the LLM call for an existing assistant message, in place.
+
+    Finds the question that produced it, retrieves fresh, and bypasses the
+    LLM cache — a cache hit here would just hand back the identical answer
+    the user asked to regenerate away from. Updates the same message row
+    (content + citations) rather than appending a new one, so the transcript
+    doesn't grow and the message keeps its position.
+    """
+    owned_notebook(notebook_id, db, user)
+
+    assistant_msg = db.get(ChatMessage, message_id)
+    if (
+        assistant_msg is None
+        or assistant_msg.notebook_id != notebook_id
+        or assistant_msg.role != MessageRole.assistant
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Assistant message not found")
+
+    user_msg = db.scalar(
+        select(ChatMessage)
+        .where(
+            ChatMessage.notebook_id == notebook_id,
+            ChatMessage.role == MessageRole.user,
+            ChatMessage.created_at < assistant_msg.created_at,
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(1)
+    )
+    if user_msg is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No preceding question found to regenerate an answer for",
+        )
+
+    query = user_msg.content
+    query_embedding = embeddings.embed_text(query)
+    results = rag.retrieve_chunks(
+        db, notebook_id, query_embedding, _settings.retrieval_top_k
+    )
+    chunks = [chunk for chunk, _ in results]
+    if not chunks:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No sources available to regenerate an answer from",
+        )
+
+    history = _history_before(
+        db, notebook_id, user_msg.created_at, _settings.chat_history_turns
+    )
+    marker_to_chunk = {i: chunk for i, chunk in enumerate(chunks, start=1)}
+    prompt = rag.build_prompt(query, chunks, history)
+    semantic = gateway.SemanticContext(
+        query=query, context_hash=_context_hash(chunks)
+    )
+
+    try:
+        result = gateway.call_llm(
+            prompt, str(notebook_id), semantic=semantic, bypass_cache=True
+        )
+    except gateway.GatewayError as exc:
+        if exc.rate_limited:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "All LLM providers are currently at their rate limit. Please try again in a minute.",
+            ) from exc
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"All LLM providers failed: {exc}",
+        ) from exc
+
+    citations = _citations_for(result.text, marker_to_chunk)
+    assistant_msg.content = result.text
+    assistant_msg.cited_chunk_ids = [c.chunk_id for c in citations]
+    db.commit()
+
+    if result.llm_call_id is not None:
+        db.execute(
+            update(LLMCall)
+            .where(LLMCall.id == result.llm_call_id)
+            .values(message_id=assistant_msg.id)
+        )
+        db.commit()
+
+    return ChatResponse(
+        answer=result.text,
+        citations=citations,
+        provider=result.provider,
+        model=result.model,
+        status=result.status,
+        latency_ms=result.latency_ms,
+        cost_usd=float(result.cost_usd or 0.0),
+        cache_hit=result.cache_hit,
+        message_id=assistant_msg.id,
     )
 
 

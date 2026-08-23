@@ -269,14 +269,19 @@ def call_llm(
     notebook_id: str,
     *,
     semantic: SemanticContext | None = None,
+    bypass_cache: bool = False,
 ) -> LLMResult:
+    """See module docstring. ``bypass_cache`` skips the lookup (a fresh
+    provider call still overwrites the cache entry afterward) — used by the
+    regenerate-answer endpoint, where a cache hit would just hand back the
+    identical answer the user asked to regenerate away from."""
     key = _cache_key(notebook_id, prompt)
     nb_uuid = uuid.UUID(str(notebook_id))
     db = SessionLocal()
     try:
         # 1. Cache lookup ------------------------------------------------------
         t0 = perf_counter()
-        cached = _lookup_cache(db, key, nb_uuid, semantic)
+        cached = None if bypass_cache else _lookup_cache(db, key, nb_uuid, semantic)
         if cached is not None:
             latency_ms = max(0, int((perf_counter() - t0) * 1000))
             call = LLMCall(

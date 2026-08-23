@@ -47,6 +47,9 @@ export interface ChatResponse {
   latency_ms: number;
   cost_usd: number;
   cache_hit: boolean;
+  /** The persisted assistant message id — null only for the "no sources
+   * yet" canned reply. Needed to call regenerateAnswer on this message. */
+  message_id: string | null;
 }
 
 /** A persisted message, as returned by GET /notebooks/{id}/messages. */
@@ -91,6 +94,42 @@ export function deleteSource(
 ): Promise<void> {
   return requestVoid(`/notebooks/${notebookId}/sources/${sourceId}`, {
     method: "DELETE",
+  });
+}
+
+/** Download a notebook's sources + chat transcript as a Markdown file.
+ * Returns the blob and the filename the backend suggested (from
+ * Content-Disposition) — bypasses the JSON-only `request` helper since this
+ * response isn't JSON. */
+export async function exportNotebook(
+  notebookId: string,
+): Promise<{ blob: Blob; filename: string }> {
+  let res: Response;
+  try {
+    res = await fetch(
+      `${API_BASE_URL}/notebooks/${notebookId}/export`,
+      withAuth(),
+    );
+  } catch {
+    throw new ApiError(
+      `Cannot reach the API at ${API_BASE_URL}. Is the backend running?`,
+      0,
+    );
+  }
+  if (!res.ok) throw await toApiError(res);
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  return { blob: await res.blob(), filename: match?.[1] ?? "notebook.md" };
+}
+
+/** Re-run ingestion for a failed source. URL sources only — uploaded files'
+ * bytes aren't kept past the original request, so those need re-uploading. */
+export function retrySource(
+  notebookId: string,
+  sourceId: string,
+): Promise<Source> {
+  return request<Source>(`/notebooks/${notebookId}/sources/${sourceId}/retry`, {
+    method: "POST",
   });
 }
 
@@ -213,11 +252,13 @@ export function getNotebook(id: string): Promise<Notebook> {
   return request<Notebook>(`/notebooks/${id}`, { cache: "no-store" });
 }
 
-export function createNotebook(title: string): Promise<Notebook> {
+/** Omit title (or pass "") to get "Untitled" — auto-renamed once the first
+ * source finishes ingesting. */
+export function createNotebook(title?: string): Promise<Notebook> {
   return request<Notebook>("/notebooks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({ title: title?.trim() || null }),
   });
 }
 
@@ -304,6 +345,17 @@ export interface NotebookStat {
   calls: number;
   cost_usd: number;
 }
+
+/** Current usage vs. each chain model's free-tier quota. Account-wide, not
+ * scoped to the caller. */
+export interface RateLimitStat {
+  provider: string;
+  model: string;
+  requests_today: number;
+  rpd_limit: number | null;
+  requests_this_minute: number;
+  rpm_limit: number | null;
+}
 export interface StatsResponse {
   total_calls: number;
   total_cost_usd: number;
@@ -319,6 +371,7 @@ export interface StatsResponse {
   by_status: StatusStat[];
   daily: DailyStat[];
   top_notebooks: NotebookStat[];
+  rate_limits: RateLimitStat[];
 }
 
 export function getStats(): Promise<StatsResponse> {
@@ -334,6 +387,18 @@ export function sendChat(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query }),
   });
+}
+
+/** Re-run an assistant message's answer, bypassing the LLM cache. Updates
+ * the message in place server-side — the transcript doesn't grow. */
+export function regenerateAnswer(
+  notebookId: string,
+  messageId: string,
+): Promise<ChatResponse> {
+  return request<ChatResponse>(
+    `/notebooks/${notebookId}/messages/${messageId}/regenerate`,
+    { method: "POST" },
+  );
 }
 
 export interface StreamHandlers {

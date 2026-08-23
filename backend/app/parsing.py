@@ -8,10 +8,20 @@ from __future__ import annotations
 
 import io
 import re
+from dataclasses import dataclass
 
 
 class ParseError(Exception):
     """Raised when a source cannot be parsed into usable text."""
+
+
+@dataclass
+class ParsedURL:
+    text: str
+    # The page's <title> (or trafilatura's best-effort equivalent) — used to
+    # auto-name a notebook from its first source. None if trafilatura
+    # couldn't find one; callers fall back to the URL itself.
+    title: str | None
 
 
 def _normalize_whitespace(text: str) -> str:
@@ -50,7 +60,7 @@ def parse_docx(data: bytes) -> str:
     return text
 
 
-def parse_url(url: str) -> str:
+def parse_url(url: str) -> ParsedURL:
     import trafilatura
 
     try:
@@ -63,6 +73,14 @@ def parse_url(url: str) -> str:
             include_tables=True,
             favor_recall=True,
         )
+        # Best-effort — a notebook still gets auto-named from the URL itself
+        # if metadata extraction fails or the page has no title.
+        title = None
+        try:
+            metadata = trafilatura.extract_metadata(downloaded)
+            title = metadata.title if metadata else None
+        except Exception:  # noqa: BLE001
+            pass
     except ParseError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -70,4 +88,4 @@ def parse_url(url: str) -> str:
     text = _normalize_whitespace(extracted or "")
     if not text:
         raise ParseError(f"No main content extracted from URL: {url}")
-    return text
+    return ParsedURL(text=text, title=title)
