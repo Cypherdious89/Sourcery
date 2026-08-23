@@ -8,6 +8,7 @@ session is already closed by the time this runs) and drives the source's
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 
 from sqlalchemy import delete
@@ -15,11 +16,16 @@ from sqlalchemy.dialects.postgresql import Range
 
 from app import embeddings
 from app.chunking import chunk_text
+from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Chunk, Source, SourceStatus, SourceType
 from app.parsing import ParseError, parse_docx, parse_pdf, parse_url
 
 logger = logging.getLogger("app.ingestion")
+
+# Bounds how many sources parse/fetch/embed at once — see config.py's
+# max_concurrent_ingestions for why this exists.
+_ingestion_semaphore = threading.Semaphore(get_settings().max_concurrent_ingestions)
 
 
 def ingest_source(
@@ -33,8 +39,22 @@ def ingest_source(
     """Parse, chunk, embed, and store a source's content.
 
     Idempotent-ish: any pre-existing chunks for this source are cleared before
-    re-inserting, so a retry doesn't duplicate rows.
+    re-inserting, so a retry doesn't duplicate rows. Blocks until a slot under
+    max_concurrent_ingestions is free, so a burst of sources added together
+    queues rather than running all at once.
     """
+    with _ingestion_semaphore:
+        _ingest_source(source_id, notebook_id, source_type, file_bytes=file_bytes, url=url)
+
+
+def _ingest_source(
+    source_id: uuid.UUID,
+    notebook_id: uuid.UUID,
+    source_type: SourceType,
+    *,
+    file_bytes: bytes | None = None,
+    url: str | None = None,
+) -> None:
     db = SessionLocal()
     try:
         source = db.get(Source, source_id)

@@ -109,6 +109,18 @@ class Settings(BaseSettings):
     semantic_cache_enabled: bool = True
     semantic_cache_threshold: float = 0.97
 
+    # --- Ingestion ---
+    # Each added source spawns its own FastAPI BackgroundTask, and those run
+    # concurrently in separate threads. Parsing/fetching (unlike the embed
+    # step, which is already serialized — see embeddings.py) is not, so
+    # bulk-adding several sources at once multiplies peak memory by however
+    # many are in flight. On Render's free 512MB tier — already close to the
+    # ceiling with torch + MiniLM loaded at idle — that multiplication is
+    # what tips it into OOM, not any single source's footprint. Capping
+    # concurrent ingestions bounds peak memory regardless of burst size, at
+    # the cost of bulk adds finishing more slowly.
+    max_concurrent_ingestions: int = 2
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
