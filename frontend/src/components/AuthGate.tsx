@@ -31,11 +31,15 @@ function Loading() {
 function SignedIn({ children }: { children: React.ReactNode }) {
   const { data: session, status } = useSession();
 
-  // Hand the API client a way to read the current token.
+  // Hand the API client a way to read the current token. Set synchronously
+  // during render, not in a useEffect — child effects (e.g. the notebooks
+  // page's initial fetch) run before a parent's own effect in the same
+  // commit, so an effect here would fire too late and every first request
+  // after sign-in would go out with no bearer token.
+  setAuthTokenGetter(() => session?.idToken);
   useEffect(() => {
-    setAuthTokenGetter(() => session?.idToken);
     return () => setAuthTokenGetter(() => undefined);
-  }, [session]);
+  }, []);
 
   if (status === "loading") return <Loading />;
 
