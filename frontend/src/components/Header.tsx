@@ -33,7 +33,7 @@ export function Header({
           <IconSparkles className="h-4 w-4" />
         </span>
         <span className="hidden text-sm font-semibold tracking-tight text-fg sm:inline">
-          RAG Gateway
+          Sourcery
         </span>
       </Link>
 

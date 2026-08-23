@@ -1,4 +1,6 @@
-# NotebookLM-Style RAG Chat, on a Self-Built LLM Gateway
+# Sourcery
+
+NotebookLM-style RAG chat, on a self-built LLM gateway.
 
 A notebook-scoped Retrieval-Augmented Generation chat app. Create a "notebook,"
 add sources (PDF/DOCX upload or a pasted URL), and chat with an assistant that
@@ -31,7 +33,7 @@ and the gateway owns the messy parts:
 | Concern | How it's handled |
 |---|---|
 | **Redundant spend** | `(notebook_id, normalized_prompt)` is hashed into a Postgres cache table. A hit returns in ~2 ms at $0.00 and never touches a provider. A **semantic** layer also matches paraphrases via the query embedding, gated on the retrieved chunks being identical. |
-| **Provider failure** | Timeout / 5xx / rate-limit on the primary retries once against a fallback provider, and the call is logged with `status="fallback"`. |
+| **Provider failure** | Timeout / 5xx / rate-limit on a hop walks a 5-model chain (`gemini-3.5-flash → gemini-3.6-flash → groq/gpt-oss-120b → groq/gpt-oss-20b → gemini-3-flash-preview`), each checked against its own real free-tier quota before being attempted — see "Rate-limit awareness" below. The call is logged with `status="fallback"` once any hop past the first one answers. |
 | **Cost blindness** | Every call writes a row to `llm_calls`: provider, model, tokens, computed USD cost, latency, cache hit. The transparency panel reads from the same data. |
 | **Vendor lock-in** | Providers are adapters behind a `Provider` protocol. Swapping Gemini for Groq is a config change, not a refactor. |
 | **Total failure** | If both providers fail, the gateway still logs an `error` row and raises a typed exception the API turns into a real user-facing message. |
@@ -149,6 +151,43 @@ aborts the client-side fetch and keeps whatever text streamed so far as a
 is still logged to `llm_calls` (tokens already billed can't be un-spent),
 only the client stops rendering further tokens.
 
+**Ingestion progress.** `sources.progress` (0-100) advances through coarse
+checkpoints — queued (0) → parsing (30) → chunking (50) → embedding (50-90,
+subdivided per Gemini batch call for a source large enough to need more than
+one) → ready (100) — so the UI shows a real percentage instead of a plain
+spinner, and a source waiting behind `MAX_CONCURRENT_INGESTIONS` reads
+differently (0%, `pending`) from one actually in flight.
+
+**Retry a failed source** — `POST /notebooks/{id}/sources/{id}/retry`.
+Only `url` sources: the URL is stored, so re-fetching just re-runs the same
+pipeline. An uploaded file's bytes are never persisted past the original
+request (no blob storage in this app), so a failed PDF/DOCX upload can't be
+retried server-side — the endpoint 422s with a message to re-upload instead.
+
+**Regenerate an answer** — `POST /notebooks/{id}/messages/{id}/regenerate`
+re-runs the LLM call for an existing assistant message, retrieving fresh and
+bypassing the LLM cache (a hit would just hand back the identical answer
+being regenerated away from), then updates that same message row rather than
+appending a new one — the transcript doesn't grow.
+
+**Auto-generated notebook titles.** `POST /notebooks` accepts no title
+(defaults to `"Untitled"`); once a still-untitled notebook's first source
+reaches `ready`, ingestion renames it — the source filename for PDF/DOCX, or
+the page's own `<title>` (via trafilatura metadata) for a URL, falling back
+to the URL itself if the page has none.
+
+**Markdown export** — `GET /notebooks/{id}/export` downloads a notebook's
+sources list plus its full chat transcript (with citations and per-message
+provider/model/cost) as a single `.md` file.
+
+**Rate-limit awareness.** `app/rate_limits.py` tracks each chain model's real
+free-tier RPM/TPM/RPD (read from that account's own dashboard, since Google
+doesn't publish free-tier numbers and Groq's evolve as models rotate) against
+usage logged in `llm_calls`, and skips a hop proactively if it's already
+exhausted rather than waiting on a 429. The same numbers are surfaced on the
+stats page as a per-model "12/20 requests used today" bar, closing the loop
+between "why did this answer come from Groq" and something you can see.
+
 ## Tests
 
 ```bash
@@ -157,7 +196,7 @@ pip install -r requirements-dev.txt
 python -m pytest -q      # run via `python -m`, not a bare `pytest`, so cwd is on sys.path
 ```
 
-50 tests, no network calls, real local Postgres (deliberately not mocked — the
+67 tests, no network calls, real local Postgres (deliberately not mocked — the
 gateway's value IS what it writes to the database). Embeddings are mocked
 with a deterministic, network-free stand-in (`tests/conftest.py`'s
 `fake_embeddings`) — bag-of-words hashing, so paraphrases land at cosine
@@ -167,8 +206,12 @@ semantic-cache tests need without ever calling the real Gemini embedding API.
 branch — cache hit skips the provider, a retryable failure falls over to the
 next hop in the chain, a rate-limited hop is skipped without being called, a
 fatal error never retries, a mid-stream failure raises instead of splicing
-two answers together. `test_rag.py` and `test_websearch.py` cover parsing;
-`test_api.py` smoke-tests routing and ownership in auth-disabled mode.
+two answers together. `tests/test_providers.py` locks in a real production
+incident (a Gemini model rejecting `thinking_config` with a message that
+never says "thinking" — see "Known limitations"). `test_rag.py` and
+`test_websearch.py` cover parsing; `test_api.py` smoke-tests routing,
+ownership, retry/regenerate/export endpoints, and auto-titling in
+auth-disabled mode.
 
 ## Tech Stack
 
@@ -219,11 +262,24 @@ curl -X POST http://localhost:8000/notebooks \
 
 ## Deploying
 
-The full checklist for **Neon + Render + Vercel** — including pushing this
-repo to GitHub, which it doesn't have a remote for yet — lives in
+The full checklist for **Neon + Render + Vercel** lives in
 [`DEPLOYMENT.md`](DEPLOYMENT.md). Config lives in [`render.yaml`](render.yaml)
 and [`frontend/vercel.json`](frontend/vercel.json); no secrets are committed —
 every secret is marked `sync: false` and set in the provider dashboard.
+
+## Documentation
+
+- [`docs/HLD.md`](docs/HLD.md) — high-level design: architecture, major
+  components, and the reasoning behind the big calls (gateway pattern,
+  hosted embeddings, rate-limit-aware fallback).
+- [`docs/LLD.md`](docs/LLD.md) — low-level design: data model, API surface,
+  and sequence flows for ingestion, chat, and rate-limit checks.
+- [`docs/FUTURE_SCOPE.md`](docs/FUTURE_SCOPE.md) — features deliberately
+  deferred (chat threads, notebook sharing, in-notebook search, and more),
+  each with a short design sketch for picking it back up later.
+- [`Mem-Claude/SPEC.md`](Mem-Claude/SPEC.md) — the original project spec and
+  source of truth for scope; where the implementation deviates (model IDs,
+  mainly), the deviation is commented at the site.
 
 ## Known limitations
 
@@ -290,8 +346,26 @@ prompt problem, and could reasonably fall through to the next hop instead of
 aborting — but is unchanged from the original single-fallback design pending
 a decision on whether to split that distinction out.
 
-**Single-user by design.** No auth, no tenancy, no rate limiting. Anyone who can
-reach the API can read and write every notebook. See SPEC.md "Non-goals."
+One specific case of this **was** a real production bug, since fixed:
+`gemini-3.6-flash` rejects `thinking_config` with a plain 400 whose message
+never mentions "thinking" ("Request contains an invalid argument"), so the
+provider's own built-in "retry without thinking config" recovery — matched
+on message text — silently missed it and the whole chain aborted as if the
+request were genuinely malformed. `providers.py`'s `_rejects_thinking` now
+treats any 400 from a thinking-configured call as a retry candidate instead
+of pattern-matching wording; `tests/test_providers.py` locks it in.
+
+**Rate limiting and per-user isolation are two different things — this app
+has one but not the other.** Google sign-in (above) gives real per-user data
+isolation: notebooks, sources, and chat history are scoped to `users.id`, and
+one signed-in user cannot read or write another's notebook. What it does
+*not* have is per-user API throttling — `app/rate_limits.py` tracks quota
+against the shared Gemini/Groq API keys account-wide, not per caller, so one
+user's heavy usage can exhaust the day's Gemini quota for everyone else on
+the same deployment. Fine for a single-owner portfolio deploy; a real
+multi-tenant app would need per-user or per-notebook rate limits on top of
+this. With `GOOGLE_CLIENT_ID` unset, auth is off entirely and everything is
+owned by the sentinel `local-dev` user — see SPEC.md "Non-goals."
 
 ## Repository layout
 
@@ -299,24 +373,26 @@ reach the API can read and write every notebook. See SPEC.md "Non-goals."
 .
 ├── backend/
 │   ├── app/
-│   │   ├── gateway.py      ← fallback, caching, cost/latency logging
-│   │   ├── providers.py    ← Gemini/Groq adapters + error taxonomy
-│   │   ├── rag.py          ← retrieval, prompt build, citation parsing
-│   │   ├── ingestion.py    ← parse → chunk → embed → store
-│   │   ├── models.py       ← SQLAlchemy models (mirrors SPEC data model)
-│   │   └── routers/        ← notebooks, sources, chat
-│   ├── alembic/            ← migrations (creates the pgvector extension)
-│   ├── embeddings.py       ← gemini-embedding-001, hosted (no local model)
+│   │   ├── gateway.py       ← fallback chain, caching, cost/latency logging
+│   │   ├── providers.py     ← Gemini/Groq adapters + error taxonomy
+│   │   ├── rate_limits.py   ← per-model RPM/TPM/RPD tracking + headroom checks
+│   │   ├── rag.py           ← retrieval, prompt build, citation parsing
+│   │   ├── ingestion.py     ← parse → chunk → embed → store, progress tracking
+│   │   ├── embeddings.py    ← gemini-embedding-001, hosted (no local model)
+│   │   ├── export.py        ← Markdown export (sources + chat transcript)
+│   │   ├── models.py        ← SQLAlchemy models (mirrors SPEC data model)
+│   │   └── routers/         ← notebooks, sources, chat, export, stats
+│   ├── alembic/             ← migrations (creates the pgvector extension)
 │   └── requirements-ingest.txt   ← local dev + production alike
 ├── frontend/src/
-│   ├── app/                ← App Router pages
-│   ├── components/         ← SourcesPanel, ChatPanel, citations, transparency
-│   └── lib/                ← typed API client, source-polling hook
+│   ├── app/                 ← App Router pages
+│   ├── components/          ← SourcesPanel, ChatPanel, LandingPage, transparency
+│   └── lib/                 ← typed API client, source-polling hook
+├── docs/
+│   ├── HLD.md            ← high-level design
+│   ├── LLD.md            ← low-level design
+│   └── FUTURE_SCOPE.md   ← deferred features, each with a short design sketch
 ├── DEPLOYMENT.md
 ├── render.yaml
 └── docker-compose.yml
 ```
-
-`Mem-Claude/SPEC.md` is the original project spec and remains the source of truth for
-scope; where the implementation deviates (model IDs, mainly), the deviation is
-commented at the site.

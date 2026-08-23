@@ -47,7 +47,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             <IconSparkles className="h-6 w-6" />
           </span>
           <h1 className="mt-5 text-3xl font-semibold tracking-tight text-fg sm:text-4xl">
-            RAG Gateway
+            Sourcery
           </h1>
           <p className="mt-3 max-w-lg text-balance text-base text-muted">
             Turn your PDFs, docs, and web pages into a notebook you can chat

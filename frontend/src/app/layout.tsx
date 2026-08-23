@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NotebookLM RAG Gateway",
+  title: "Sourcery",
   description:
     "Notebook-scoped RAG chat with inline citations and a transparent LLM gateway.",
 };

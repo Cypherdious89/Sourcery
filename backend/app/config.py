@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     # --- Core / app ---
-    app_name: str = "NotebookLM RAG Gateway"
+    app_name: str = "Sourcery"
     environment: str = "development"
     # Comma-separated list of allowed CORS origins for the frontend.
     cors_origins: str = "http://localhost:3000"
