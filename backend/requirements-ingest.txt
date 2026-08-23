@@ -13,8 +13,13 @@ trafilatura>=1.12,<2
 sentence-transformers>=3.3,<4
 
 # LLM providers routed through the gateway
-google-genai>=1.0,<2
+# Floor of 1.10 because ThinkingConfig.thinking_budget (see providers.py) was
+# added there; older 1.x releases raise a pydantic extra_forbidden error.
+google-genai>=1.10,<2
 # Also drives the Groq fallback — its API is OpenAI-compatible, so this same
 # SDK is reused with a different base_url (see providers.py).
 openai>=1.55,<2
-httpx>=0.27,<0.28
+# google-genai>=1.10 requires httpx>=0.28.1, so the old <0.28 cap forced pip's
+# resolver to backtrack google-genai all the way to 1.2.0 to satisfy both —
+# which is exactly the version missing thinking_budget above.
+httpx>=0.28,<0.29
