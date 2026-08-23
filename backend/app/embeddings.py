@@ -38,8 +38,16 @@ def get_model():
     if _model is None:
         with _model_lock:
             if _model is None:
+                import torch
                 from sentence_transformers import SentenceTransformer
 
+                # BLAS/torch default to one thread per CPU core, and each
+                # thread pre-allocates its own working buffers on first use —
+                # on a memory-constrained host (e.g. Render's free 512MB
+                # tier) that overhead is pure waste: MiniLM inference is
+                # milliseconds regardless, and _encode_lock already
+                # serializes every call, so there's no parallelism to lose.
+                torch.set_num_threads(1)
                 _model = SentenceTransformer(_settings.embedding_model)
     return _model
 

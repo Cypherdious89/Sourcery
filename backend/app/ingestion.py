@@ -7,7 +7,10 @@ session is already closed by the time this runs) and drives the source's
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import logging
+import sys
 import threading
 import uuid
 
@@ -44,7 +47,29 @@ def ingest_source(
     queues rather than running all at once.
     """
     with _ingestion_semaphore:
-        _ingest_source(source_id, notebook_id, source_type, file_bytes=file_bytes, url=url)
+        try:
+            _ingest_source(source_id, notebook_id, source_type, file_bytes=file_bytes, url=url)
+        finally:
+            _release_memory_to_os()
+
+
+def _release_memory_to_os() -> None:
+    """Hand freed heap memory back to the OS after a source finishes.
+
+    glibc's malloc doesn't return freed arenas to the OS on its own — it
+    keeps them for reuse, so RSS only ever grows across a long-running
+    process. On a memory-constrained host (Render's free 512MB tier) that
+    means a burst of large sources can ratchet RSS up permanently even
+    though nothing is actually leaked. malloc_trim(0) forces the return;
+    it's a glibc-only call, so this is a no-op everywhere else (e.g. local
+    macOS dev, which uses a different allocator).
+    """
+    gc.collect()
+    if sys.platform == "linux":
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except OSError:
+            pass
 
 
 def _ingest_source(
