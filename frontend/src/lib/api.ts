@@ -104,6 +104,20 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Called on any 401 from the backend — an expired/invalid Google ID token,
+ * or a missing one. Registered by AuthGate (like setAuthTokenGetter) rather
+ * than imported, so this module stays free of any auth-library dependency.
+ * Without this, an expired token surfaced as a raw error message in whatever
+ * UI happened to be making the request, with no way back to sign-in short of
+ * a manual reload.
+ */
+let unauthorizedHandler: (() => void) | undefined;
+
+export function setUnauthorizedHandler(handler: (() => void) | undefined): void {
+  unauthorizedHandler = handler;
+}
+
 /** FastAPI errors come back as `{detail: ...}`; unwrap to a readable string. */
 async function toApiError(res: Response): Promise<ApiError> {
   let message = `${res.status} ${res.statusText}`;
@@ -121,6 +135,7 @@ async function toApiError(res: Response): Promise<ApiError> {
   } catch {
     // Non-JSON body (e.g. a proxy error page) — keep the status line.
   }
+  if (res.status === 401) unauthorizedHandler?.();
   return new ApiError(message, res.status);
 }
 

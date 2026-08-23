@@ -72,10 +72,6 @@ class Provider(Protocol):
 # Gemini
 # --------------------------------------------------------------------------- #
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-# Raised when a model doesn't accept the configured thinking knob (Gemini 3.x
-# rejects thinking_budget; 2.5/3.5 accept it). Detected by message, since the
-# API reports it as a generic 400 INVALID_ARGUMENT.
-_THINKING_REJECTED = ("thinking", "thought")
 
 
 class GeminiProvider:
@@ -128,13 +124,22 @@ class GeminiProvider:
         return FatalProviderError(f"gemini error: {exc}")
 
     def _rejects_thinking(self, exc: Exception) -> bool:
+        """Whether this looks like a model rejecting the thinking_config knob.
+
+        Confirmed against gemini-3.6-flash: the API reports this as a plain
+        400 INVALID_ARGUMENT with the generic message "Request contains an
+        invalid argument" — no mention of "thinking" at all, so matching on
+        message text (the previous approach) silently misses it and lets a
+        real rejection get misclassified as fatal, aborting the whole
+        fallback chain. Any 400 on a call that included thinking_config is
+        treated as a candidate: retrying once without it is cheap, and if the
+        retry also 400s, that failure still propagates and gets classified
+        normally — so this can't mask a genuinely bad request, only recover
+        from ones caused by the thinking knob itself.
+        """
         from google.genai import errors
 
-        return (
-            isinstance(exc, errors.APIError)
-            and getattr(exc, "code", None) == 400
-            and any(word in str(exc).lower() for word in _THINKING_REJECTED)
-        )
+        return isinstance(exc, errors.APIError) and getattr(exc, "code", None) == 400
 
     def generate(self, prompt: str) -> ProviderResponse:
         client = self._client()

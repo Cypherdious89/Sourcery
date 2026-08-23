@@ -2,7 +2,11 @@
 
 import { SessionProvider, signIn, signOut, useSession } from "next-auth/react";
 import { useEffect, useState } from "react";
-import { getAuthConfig, setAuthTokenGetter } from "@/lib/api";
+import {
+  getAuthConfig,
+  setAuthTokenGetter,
+  setUnauthorizedHandler,
+} from "@/lib/api";
 import { Button } from "./Button";
 import { Header } from "./Header";
 import { IconGoogle, IconSparkles } from "./icons";
@@ -38,7 +42,16 @@ function SignedIn({ children }: { children: React.ReactNode }) {
   // after sign-in would go out with no bearer token.
   setAuthTokenGetter(() => session?.idToken);
   useEffect(() => {
-    return () => setAuthTokenGetter(() => undefined);
+    // Google ID tokens expire after ~1 hour and Auth.js doesn't refresh them
+    // on its own — the backend then rejects every request with a 401. Sign
+    // out and drop back to the sign-in screen instead of leaving a raw
+    // "invalid/expired token" error stuck in whatever panel made the
+    // request, with no way back short of a manual reload.
+    setUnauthorizedHandler(() => signOut());
+    return () => {
+      setAuthTokenGetter(() => undefined);
+      setUnauthorizedHandler(undefined);
+    };
   }, []);
 
   if (status === "loading") return <Loading />;
