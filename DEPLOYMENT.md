@@ -299,10 +299,11 @@ Now that you have the real Vercel URL:
 - **Rotating a key** (Gemini, Tavily, OAuth secret): update it in the Render
   or Vercel dashboard only. Nothing to rebuild or re-commit — this is the
   entire point of keeping secrets out of the repo.
-- **New migration**: run `alembic upgrade head` against the Neon
-  `DATABASE_URL` from your machine before or right after deploying the
-  backend change that depends on it. Render's free tier has no pre-deploy
-  hook, so this stays a manual step.
+- **New migration**: Render runs `python -m alembic upgrade head` before
+  Uvicorn starts, so a normal backend deploy applies pending revisions before
+  the new application code serves traffic. For a manual recovery or schema
+  inspection, run the same command against the Neon `DATABASE_URL` from your
+  machine.
 - **Cost**: all three tiers are free at this scale. The only real spend is
   Gemini API usage — the gateway's cache and the `/stats` cost ledger exist
   specifically so that stays visible instead of a surprise.

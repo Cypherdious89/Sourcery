@@ -21,7 +21,9 @@ services:
       pip install --upgrade pip
       pip install -r requirements-ingest.txt
 
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    # Apply additive schema migrations before serving. Alembic records the
+    # applied revision, so a deploy with no new migrations is a no-op.
+    startCommand: python -m alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
     envVars:
       - key: PYTHON_VERSION
