@@ -30,6 +30,18 @@ logger = logging.getLogger("app.ingestion")
 # max_concurrent_ingestions for why this exists.
 _ingestion_semaphore = threading.Semaphore(get_settings().max_concurrent_ingestions)
 
+# Coarse checkpoint progress (0-100). Embedding is now a real network call
+# (Gemini), not an instant local one, so it gets a range rather than a single
+# jump — see embeddings.embed_texts' on_batch for how PROGRESS_EMBED_START..
+# PROGRESS_EMBED_DONE gets subdivided for a source large enough to need more
+# than one embedding batch (rare — most sources fit in one).
+PROGRESS_STARTED = 10
+PROGRESS_PARSED = 30
+PROGRESS_CHUNKED = 50
+PROGRESS_EMBED_START = 50
+PROGRESS_EMBED_DONE = 90
+PROGRESS_READY = 100
+
 
 def ingest_source(
     source_id: uuid.UUID,
@@ -88,6 +100,7 @@ def _ingest_source(
             return
 
         source.status = SourceStatus.processing
+        source.progress = PROGRESS_STARTED
         db.commit()
 
         # 1. Parse -> plain text
@@ -103,13 +116,28 @@ def _ingest_source(
         else:  # pragma: no cover - guarded by the router
             raise ParseError(f"Unsupported source type: {source_type}")
 
+        source.progress = PROGRESS_PARSED
+        db.commit()
+
         # 2. Chunk (~500 tokens, ~50 overlap; word-count approximation)
         pieces = chunk_text(text)
         if not pieces:
             raise ParseError("No chunks produced from source content")
 
-        # 3. Embed locally (batch)
-        vectors = embeddings.embed_texts([p.content for p in pieces])
+        source.progress = PROGRESS_CHUNKED
+        db.commit()
+
+        # 3. Embed (Gemini, hosted — see app/embeddings.py)
+        def _on_batch(done: int, total: int) -> None:
+            span = PROGRESS_EMBED_DONE - PROGRESS_EMBED_START
+            source.progress = PROGRESS_EMBED_START + int(span * done / total)
+            db.commit()
+
+        vectors = embeddings.embed_texts(
+            [p.content for p in pieces], on_batch=_on_batch
+        )
+        source.progress = PROGRESS_EMBED_DONE
+        db.commit()
 
         # 4. Store, scoped to notebook_id + source_id
         db.execute(delete(Chunk).where(Chunk.source_id == source_id))
@@ -128,6 +156,7 @@ def _ingest_source(
         )
 
         source.status = SourceStatus.ready
+        source.progress = PROGRESS_READY
         db.commit()
         logger.info(
             "ingest_source: source %s ready (%d chunks)", source_id, len(pieces)

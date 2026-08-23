@@ -23,6 +23,8 @@ export interface Source {
   type: SourceType;
   original_name_or_url: string;
   status: SourceStatus;
+  /** 0-100, coarse checkpoint progress through parse/chunk/embed/store. */
+  progress: number;
   ingested_at: string;
 }
 

@@ -11,9 +11,22 @@ const STYLES: Record<SourceStatus, string> = {
     "bg-red-50 text-red-700 ring-red-200 dark:bg-red-950/50 dark:text-red-300 dark:ring-red-900",
 };
 
-/** Ingestion status pill. `pending`/`processing` animate so polling is visible. */
-export function StatusBadge({ status }: { status: SourceStatus }) {
+/**
+ * Ingestion status pill. `pending`/`processing` animate so polling is
+ * visible. `progress` (0-100) shows during `processing` — parsing/chunking
+ * are near-instant, but embedding is now a real network call (Gemini), so a
+ * percentage is more honest feedback than a plain spinner.
+ */
+export function StatusBadge({
+  status,
+  progress,
+}: {
+  status: SourceStatus;
+  progress?: number;
+}) {
   const inFlight = status === "pending" || status === "processing";
+  const showProgress =
+    status === "processing" && typeof progress === "number" && progress > 0;
   return (
     <span
       className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${STYLES[status]}`}
@@ -22,7 +35,7 @@ export function StatusBadge({ status }: { status: SourceStatus }) {
         aria-hidden
         className={`h-1.5 w-1.5 rounded-full bg-current ${inFlight ? "animate-pulse" : ""}`}
       />
-      {status}
+      {showProgress ? `${status} · ${progress}%` : status}
     </span>
   );
 }

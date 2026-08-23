@@ -166,8 +166,22 @@ export function SourcesPanel({ state }: { state: UseSources }) {
                   Ingestion failed — check the backend logs.
                 </span>
               )}
+              {s.status === "processing" && s.progress > 0 && (
+                <span
+                  className="mt-1 block h-1 w-full max-w-40 overflow-hidden rounded-full bg-inset"
+                  role="progressbar"
+                  aria-valuenow={s.progress}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <span
+                    className="block h-full rounded-full bg-blue-500 transition-[width] duration-500 dark:bg-blue-400"
+                    style={{ width: `${s.progress}%` }}
+                  />
+                </span>
+              )}
             </span>
-            <StatusBadge status={s.status} />
+            <StatusBadge status={s.status} progress={s.progress} />
             <IconButton
               onClick={() => removeSource(s.id)}
               disabled={busy}

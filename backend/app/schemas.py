@@ -58,6 +58,7 @@ class SourceOut(BaseModel):
     type: SourceType
     original_name_or_url: str
     status: SourceStatus
+    progress: int
     ingested_at: datetime
 
 
