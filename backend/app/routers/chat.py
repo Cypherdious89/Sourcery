@@ -165,6 +165,11 @@ def chat(
     try:
         result = gateway.call_llm(prompt, str(notebook_id), semantic=semantic)
     except gateway.GatewayError as exc:
+        if exc.rate_limited:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "All LLM providers are currently at their rate limit. Please try again in a minute.",
+            ) from exc
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             f"All LLM providers failed: {exc}",
@@ -321,7 +326,11 @@ def chat_stream(
         except gateway.GatewayError as exc:
             # The response is already a 200 by now, so failures are reported
             # in-band as an `error` event.
-            yield _sse("error", {"message": f"All LLM providers failed: {exc}"})
+            if exc.rate_limited:
+                message = "All LLM providers are currently at their rate limit. Please try again in a minute."
+            else:
+                message = f"All LLM providers failed: {exc}"
+            yield _sse("error", {"message": message})
 
     return StreamingResponse(
         event_stream(),

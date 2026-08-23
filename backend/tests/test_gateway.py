@@ -13,7 +13,7 @@ from collections.abc import Iterator
 import pytest
 from sqlalchemy import select
 
-from app import gateway
+from app import gateway, rate_limits
 from app.models import LLMCall, LLMCallStatus
 from app.providers import (
     FatalProviderError,
@@ -117,7 +117,7 @@ def _error_rows(db, notebook_id):
 # --------------------------------------------------------------------------- #
 def test_cache_miss_then_exact_hit(db, notebook, monkeypatch):
     primary = SuccessProvider()
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, None))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary])
 
     first = gateway.call_llm("What is a widget?", str(notebook.id))
     assert first.cache_hit is False
@@ -140,7 +140,7 @@ def test_cache_miss_then_exact_hit(db, notebook, monkeypatch):
 def test_primary_retryable_falls_over_to_working_fallback(db, notebook, monkeypatch):
     primary = RetryableFailProvider(name="primary")
     fallback = SuccessProvider(name="fallback")
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, fallback))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary, fallback])
 
     result = gateway.call_llm("unique prompt A", str(notebook.id))
 
@@ -161,7 +161,7 @@ def test_primary_retryable_falls_over_to_working_fallback(db, notebook, monkeypa
 def test_both_providers_fail_raises_and_logs_error_row(db, notebook, monkeypatch):
     primary = RetryableFailProvider(name="primary")
     fallback = RetryableFailProvider(name="fallback")
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, fallback))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary, fallback])
 
     with pytest.raises(gateway.GatewayError):
         gateway.call_llm("unique prompt B", str(notebook.id))
@@ -177,7 +177,7 @@ def test_fatal_error_never_retries_fallback(db, notebook, monkeypatch):
     triggers failover on timeout/5xx/rate-limit."""
     primary = FatalFailProvider(name="primary")
     fallback = SuccessProvider(name="fallback")
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, fallback))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary, fallback])
 
     with pytest.raises(gateway.GatewayError):
         gateway.call_llm("unique prompt C", str(notebook.id))
@@ -189,7 +189,7 @@ def test_fatal_error_never_retries_fallback(db, notebook, monkeypatch):
 
 def test_no_fallback_configured_fails_immediately(db, notebook, monkeypatch):
     primary = RetryableFailProvider(name="primary")
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, None))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary])
 
     with pytest.raises(gateway.GatewayError):
         gateway.call_llm("unique prompt D", str(notebook.id))
@@ -199,11 +199,74 @@ def test_no_fallback_configured_fails_immediately(db, notebook, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Rate-limit-aware chain (see app/rate_limits.py)
+# --------------------------------------------------------------------------- #
+def test_rate_limited_candidate_is_skipped_without_being_called(
+    db, notebook, monkeypatch
+):
+    """A candidate proactively identified as out of quota is never called at
+    all — the chain moves straight to the next one with headroom."""
+    primary = SuccessProvider(name="primary")
+    fallback = SuccessProvider(name="fallback")
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary, fallback])
+    monkeypatch.setattr(
+        rate_limits,
+        "has_headroom",
+        lambda db, provider, model: provider != "primary",
+    )
+
+    result = gateway.call_llm("unique rate-limit prompt A", str(notebook.id))
+
+    assert result.status == "fallback"
+    assert result.provider == "fallback"
+    assert primary.calls == 0, "a rate-limited candidate must never be called"
+    assert fallback.calls == 1
+
+
+def test_all_candidates_rate_limited_raises_with_flag_and_calls_nothing(
+    db, notebook, monkeypatch
+):
+    primary = SuccessProvider(name="primary")
+    fallback = SuccessProvider(name="fallback")
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary, fallback])
+    monkeypatch.setattr(rate_limits, "has_headroom", lambda db, provider, model: False)
+
+    with pytest.raises(gateway.GatewayError) as exc_info:
+        gateway.call_llm("unique rate-limit prompt B", str(notebook.id))
+
+    assert exc_info.value.rate_limited is True
+    assert primary.calls == 0
+    assert fallback.calls == 0
+    assert len(_error_rows(db, notebook.id)) == 1
+
+
+def test_stream_rate_limited_candidate_is_skipped_without_being_called(
+    db, notebook, monkeypatch
+):
+    primary = SuccessProvider(name="primary")
+    fallback = SuccessProvider(name="fallback")
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary, fallback])
+    monkeypatch.setattr(
+        rate_limits,
+        "has_headroom",
+        lambda db, provider, model: provider != "primary",
+    )
+
+    chunks = list(gateway.stream_llm("unique stream rate-limit prompt", str(notebook.id)))
+
+    assert primary.stream_calls == 0, "a rate-limited candidate must never be called"
+    assert fallback.stream_calls == 1
+    final = [c.result for c in chunks if c.result is not None][0]
+    assert final.status == "fallback"
+    assert final.provider == "fallback"
+
+
+# --------------------------------------------------------------------------- #
 # stream_llm
 # --------------------------------------------------------------------------- #
 def test_stream_cache_hit_replays_full_text_then_result(db, notebook, monkeypatch):
     primary = SuccessProvider()
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, None))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary])
 
     prompt = "streamed widget question"
     first_chunks = list(gateway.stream_llm(prompt, str(notebook.id)))
@@ -224,7 +287,7 @@ def test_stream_cache_hit_replays_full_text_then_result(db, notebook, monkeypatc
 def test_stream_falls_over_before_first_token(db, notebook, monkeypatch):
     primary = RetryableFailProvider(name="primary")
     fallback = SuccessProvider(name="fallback")
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, fallback))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary, fallback])
 
     chunks = list(gateway.stream_llm("unique stream prompt A", str(notebook.id)))
 
@@ -243,7 +306,7 @@ def test_stream_mid_stream_failure_does_not_fall_over(db, notebook, monkeypatch)
     together in front of the user."""
     primary = MidStreamFailProvider(name="primary")
     fallback = SuccessProvider(name="fallback")
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, fallback))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary, fallback])
 
     seen = []
     with pytest.raises(gateway.GatewayError):
@@ -261,7 +324,7 @@ def test_stream_mid_stream_failure_does_not_fall_over(db, notebook, monkeypatch)
 # --------------------------------------------------------------------------- #
 def test_semantic_cache_hits_on_paraphrase_same_context(db, notebook, monkeypatch):
     primary = SuccessProvider()
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, None))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary])
     context_hash = "same-retrieved-chunks"
 
     first = gateway.call_llm(
@@ -292,7 +355,7 @@ def test_semantic_cache_misses_different_context_hash(db, notebook, monkeypatch)
     """A paraphrase must NOT match if retrieval returned different chunks —
     otherwise adding/removing a source would keep serving a stale answer."""
     primary = SuccessProvider()
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, None))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary])
 
     gateway.call_llm(
         "PROMPT THREE What is retrieval-augmented generation?",
@@ -316,7 +379,7 @@ def test_semantic_cache_misses_different_context_hash(db, notebook, monkeypatch)
 
 def test_semantic_cache_misses_unrelated_question(db, notebook, monkeypatch):
     primary = SuccessProvider()
-    monkeypatch.setattr(gateway, "_build_providers", lambda: (primary, None))
+    monkeypatch.setattr(gateway, "_build_provider_chain", lambda: [primary])
     context_hash = "shared-context"
 
     gateway.call_llm(

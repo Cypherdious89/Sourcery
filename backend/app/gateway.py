@@ -5,12 +5,18 @@ Single entrypoint ``call_llm(prompt, notebook_id) -> LLMResult``:
 1. Hash ``(notebook_id, normalized_prompt)`` and check the ``llm_cache`` table.
    On a hit, return immediately (``cache_hit=True``) with only the lookup
    latency and no provider call.
-2. On a miss, call the primary provider (Gemini Flash).
-3. On a timeout/5xx/rate-limit from the primary, retry once against the
-   fallback provider (Groq, or Gemini's fallback model if no Groq key).
-   ``status="fallback"``.
+2. On a miss, build the fallback chain (see ``_build_provider_chain``) and
+   drop any candidate that's currently out of quota per
+   ``app/rate_limits.py`` — proactively, using logged usage in ``llm_calls``,
+   rather than waiting to be told with a 429.
+3. Call the first candidate with headroom. On a timeout/5xx/rate-limit,
+   move to the next candidate (``status="fallback"``); on a fatal error
+   (bad request, safety block), stop — the prompt itself is the problem and
+   every other provider would reject it identically.
 4. On success, write the response to ``llm_cache`` and log a row to ``llm_calls``.
-5. On failure of both providers, log an ``error`` row and raise ``GatewayError``.
+5. If every candidate is rate-limited, or every attempted candidate fails,
+   log an ``error`` row and raise ``GatewayError`` (``rate_limited=True`` in
+   the former case, so the caller can surface a distinct message).
 
 Callers are provider-agnostic — they never import a provider SDK. The gateway
 owns its own DB session so the contract signature stays clean.
@@ -28,6 +34,7 @@ from time import perf_counter
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app import rate_limits
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import LLMCache, LLMCall, LLMCallStatus
@@ -59,6 +66,9 @@ _PRICING: dict[str, tuple[float, float]] = {
     # Retired for new API keys (404) but kept for historical llm_calls rows.
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.5-pro": (1.25, 10.00),
+    "openai/gpt-oss-120b": (0.0, 0.0),
+    "openai/gpt-oss-20b": (0.0, 0.0),
+    # Removed from Groq's free tier; kept for historical llm_calls rows.
     "llama-3.3-70b-versatile": (0.0, 0.0),
     "offline-deterministic": (0.0, 0.0),
 }
@@ -95,9 +105,20 @@ class StreamChunk:
 class GatewayError(Exception):
     """Raised when every provider fails; caller turns it into a user message."""
 
-    def __init__(self, message: str, *, llm_call_id: uuid.UUID | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        llm_call_id: uuid.UUID | None = None,
+        rate_limited: bool = False,
+    ) -> None:
         super().__init__(message)
         self.llm_call_id = llm_call_id
+        # True when every candidate in the chain was skipped on a proactive
+        # rate-limit check — no provider was actually called. Lets the
+        # caller (see routers/chat.py) return 429 with a distinct message
+        # instead of a generic "the API is broken" 502.
+        self.rate_limited = rate_limited
 
 
 def _normalize_prompt(prompt: str) -> str:
@@ -178,34 +199,56 @@ def _estimate_cost(
     return round(pt / 1_000_000 * in_rate + ct / 1_000_000 * out_rate, 6)
 
 
-def _build_providers() -> tuple[Provider, Provider | None]:
-    """Return (primary, fallback) per configured API keys."""
+def _build_provider_chain() -> list[Provider]:
+    """Ordered fallback chain per configured API keys.
+
+    gemini_primary_model -> gemini_fallback_model -> groq_fallback_model ->
+    groq_fallback_model_2 -> gemini_tertiary_model. A hop is only included
+    when its API key is set; with no keys at all, the chain is just the
+    offline stub.
+    """
     timeout = _settings.llm_timeout_seconds
+    chain: list[Provider] = []
+
     if _settings.gemini_api_key:
-        primary: Provider = GeminiProvider(
-            _settings.gemini_api_key, _settings.gemini_primary_model, timeout
+        chain.append(
+            GeminiProvider(_settings.gemini_api_key, _settings.gemini_primary_model, timeout)
         )
-        if _settings.groq_api_key:
-            fallback: Provider | None = GroqProvider(
-                _settings.groq_api_key, _settings.groq_fallback_model, timeout
-            )
-        else:
-            # Same provider, more capable model — SPEC's fallback options are
-            # "Gemini 2.5 Pro or OpenAI"; Groq replaces OpenAI (see
-            # providers.py), so this is the remaining same-provider option.
-            fallback = GeminiProvider(
-                _settings.gemini_api_key, _settings.gemini_fallback_model, timeout
-            )
-        return primary, fallback
+        chain.append(
+            GeminiProvider(_settings.gemini_api_key, _settings.gemini_fallback_model, timeout)
+        )
+
     if _settings.groq_api_key:
-        return (
-            GroqProvider(
-                _settings.groq_api_key, _settings.groq_fallback_model, timeout
-            ),
-            None,
+        chain.append(
+            GroqProvider(_settings.groq_api_key, _settings.groq_fallback_model, timeout)
         )
-    # No keys: offline stub, no fallback needed.
-    return StubProvider(), None
+        chain.append(
+            GroqProvider(_settings.groq_api_key, _settings.groq_fallback_model_2, timeout)
+        )
+
+    if _settings.gemini_api_key:
+        chain.append(
+            GeminiProvider(_settings.gemini_api_key, _settings.gemini_tertiary_model, timeout)
+        )
+
+    return chain or [StubProvider()]
+
+
+def _rate_limit_filter(db, chain: list[Provider]) -> tuple[list[Provider], list[Provider]]:
+    """Split a chain into (has headroom, currently rate-limited).
+
+    Checked once up front against each candidate's own usage — a call to one
+    model doesn't affect another model's separate quota, so there's no need
+    to recheck mid-loop as the chain is walked.
+    """
+    available: list[Provider] = []
+    limited: list[Provider] = []
+    for provider in chain:
+        if rate_limits.has_headroom(db, provider.name, provider.model):
+            available.append(provider)
+        else:
+            limited.append(provider)
+    return available, limited
 
 
 def _semantic_values(semantic: SemanticContext | None) -> dict:
@@ -263,39 +306,62 @@ def call_llm(
                 llm_call_id=call.id,
             )
 
-        # 2-3. Provider call with single fallback -----------------------------
-        primary, fallback = _build_providers()
-        status = LLMCallStatus.ok
-        used: Provider = primary
-        resp: ProviderResponse
+        # 2-3. Provider call, walking the rate-limit-filtered chain -----------
         t0 = perf_counter()
-        try:
-            resp = primary.generate(prompt)
-        except RetryableProviderError as primary_exc:
-            if fallback is None:
-                return _fail(
-                    db, nb_uuid, primary, str(primary_exc), perf_counter() - t0
-                )
-            logger.warning(
-                "primary provider %s failed (%s); falling back to %s",
-                primary.name,
-                primary_exc,
-                fallback.name,
+        full_chain = _build_provider_chain()
+        chain, skipped = _rate_limit_filter(db, full_chain)
+        if not chain:
+            return _fail(
+                db,
+                nb_uuid,
+                skipped[0],
+                f"All providers are currently rate-limited: "
+                f"{', '.join(f'{p.name}:{p.model}' for p in skipped)}",
+                perf_counter() - t0,
+                rate_limited=True,
             )
-            status = LLMCallStatus.fallback
-            used = fallback
+        if skipped:
+            logger.info(
+                "skipping rate-limited candidates: %s",
+                ", ".join(f"{p.name}:{p.model}" for p in skipped),
+            )
+
+        status = LLMCallStatus.ok
+        used: Provider | None = None
+        resp: ProviderResponse | None = None
+        errors: list[str] = []
+        for provider in chain:
             try:
-                resp = fallback.generate(prompt)
-            except (RetryableProviderError, FatalProviderError) as fb_exc:
-                return _fail(
-                    db,
-                    nb_uuid,
-                    fallback,
-                    f"primary+fallback failed: {primary_exc} | {fb_exc}",
-                    perf_counter() - t0,
+                resp = provider.generate(prompt)
+                used = provider
+                # "ok" only if this is the very first candidate overall —
+                # anything reached via a skip or a prior failure is a
+                # fallback, even if it's index 0 of the *filtered* chain.
+                status = (
+                    LLMCallStatus.ok if provider is full_chain[0] else LLMCallStatus.fallback
                 )
-        except FatalProviderError as primary_exc:
-            return _fail(db, nb_uuid, primary, str(primary_exc), perf_counter() - t0)
+                break
+            except RetryableProviderError as exc:
+                errors.append(f"{provider.name}:{provider.model}: {exc}")
+                logger.warning(
+                    "provider %s:%s failed (%s); trying next candidate",
+                    provider.name, provider.model, exc,
+                )
+            except FatalProviderError as exc:
+                # A fatal error means the PROMPT is the problem (bad request,
+                # safety block) — every other provider would reject it the
+                # same way, so stop rather than burn through the rest of the
+                # chain.
+                return _fail(db, nb_uuid, provider, str(exc), perf_counter() - t0)
+
+        if used is None or resp is None:
+            return _fail(
+                db,
+                nb_uuid,
+                chain[-1],
+                f"All providers failed: {'; '.join(errors)}",
+                perf_counter() - t0,
+            )
 
         latency_ms = max(0, int((perf_counter() - t0) * 1000))
         cost = _estimate_cost(used.model, resp.prompt_tokens, resp.completion_tokens)
@@ -406,59 +472,74 @@ def stream_llm(
             )
             return
 
-        # 2-3. Provider stream with pre-first-token fallback -------------------
-        primary, fallback = _build_providers()
-        status = LLMCallStatus.ok
-        used: Provider = primary
+        # 2-3. Provider stream, walking the rate-limit-filtered chain --------
         t0 = perf_counter()
+        full_chain = _build_provider_chain()
+        stream_chain, stream_skipped = _rate_limit_filter(db, full_chain)
+        if not stream_chain:
+            _fail(
+                db,
+                nb_uuid,
+                stream_skipped[0],
+                f"All providers are currently rate-limited: "
+                f"{', '.join(f'{p.name}:{p.model}' for p in stream_skipped)}",
+                perf_counter() - t0,
+                rate_limited=True,
+            )
+        if stream_skipped:
+            logger.info(
+                "skipping rate-limited candidates: %s",
+                ", ".join(f"{p.name}:{p.model}" for p in stream_skipped),
+            )
 
+        status = LLMCallStatus.ok
+        used: Provider | None = None
         parts: list[str] = []
         prompt_tokens = completion_tokens = None
+        errors: list[str] = []
 
         def run(provider: Provider) -> Iterator[StreamDelta]:
             return provider.generate_stream(prompt)
 
-        try:
-            for delta in run(primary):
-                if delta.final:
-                    prompt_tokens = delta.prompt_tokens
-                    completion_tokens = delta.completion_tokens
-                elif delta.text:
-                    parts.append(delta.text)
-                    yield StreamChunk(text=delta.text)
-        except RetryableProviderError as primary_exc:
-            if parts:
-                # Already streamed text to the client — failing over now would
-                # splice two different answers together.
-                _fail(
-                    db, nb_uuid, primary,
-                    f"stream failed after {len(parts)} chunks: {primary_exc}",
-                    perf_counter() - t0,
-                )
-            if fallback is None:
-                _fail(db, nb_uuid, primary, str(primary_exc), perf_counter() - t0)
-            logger.warning(
-                "primary provider %s failed before first token (%s); falling back to %s",
-                primary.name, primary_exc, fallback.name,
-            )
-            status = LLMCallStatus.fallback
-            used = fallback
+        for provider in stream_chain:
             try:
-                for delta in run(fallback):
+                for delta in run(provider):
                     if delta.final:
                         prompt_tokens = delta.prompt_tokens
                         completion_tokens = delta.completion_tokens
                     elif delta.text:
                         parts.append(delta.text)
                         yield StreamChunk(text=delta.text)
-            except (RetryableProviderError, FatalProviderError) as fb_exc:
-                _fail(
-                    db, nb_uuid, fallback,
-                    f"primary+fallback failed: {primary_exc} | {fb_exc}",
-                    perf_counter() - t0,
+                used = provider
+                status = (
+                    LLMCallStatus.ok if provider is full_chain[0] else LLMCallStatus.fallback
                 )
-        except FatalProviderError as primary_exc:
-            _fail(db, nb_uuid, primary, str(primary_exc), perf_counter() - t0)
+                break
+            except (RetryableProviderError, FatalProviderError) as exc:
+                if parts:
+                    # Already streamed text to the client — failing over now
+                    # would splice two different answers together.
+                    _fail(
+                        db, nb_uuid, provider,
+                        f"stream failed after {len(parts)} chunks: {exc}",
+                        perf_counter() - t0,
+                    )
+                if isinstance(exc, FatalProviderError):
+                    # The PROMPT is the problem (bad request, safety block) —
+                    # every other provider would reject it the same way.
+                    _fail(db, nb_uuid, provider, str(exc), perf_counter() - t0)
+                errors.append(f"{provider.name}:{provider.model}: {exc}")
+                logger.warning(
+                    "provider %s:%s failed before first token (%s); trying next candidate",
+                    provider.name, provider.model, exc,
+                )
+
+        if used is None:
+            _fail(
+                db, nb_uuid, stream_chain[-1],
+                f"All providers failed: {'; '.join(errors)}",
+                perf_counter() - t0,
+            )
 
         text = "".join(parts)
         latency_ms = max(0, int((perf_counter() - t0) * 1000))
@@ -513,7 +594,15 @@ def stream_llm(
         db.close()
 
 
-def _fail(db, notebook_id: uuid.UUID, provider: Provider, message: str, elapsed: float):
+def _fail(
+    db,
+    notebook_id: uuid.UUID,
+    provider: Provider,
+    message: str,
+    elapsed: float,
+    *,
+    rate_limited: bool = False,
+):
     """Log an error row and raise GatewayError."""
     latency_ms = max(0, int(elapsed * 1000))
     call = LLMCall(
@@ -531,4 +620,4 @@ def _fail(db, notebook_id: uuid.UUID, provider: Provider, message: str, elapsed:
     db.commit()
     db.refresh(call)
     logger.error("gateway call failed: %s", message)
-    raise GatewayError(message, llm_call_id=call.id)
+    raise GatewayError(message, llm_call_id=call.id, rate_limited=rate_limited)

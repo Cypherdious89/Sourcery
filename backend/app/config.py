@@ -31,14 +31,19 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://rag:rag@localhost:5432/rag"
 
     # --- LLM providers (see SPEC "LLM Gateway Contract") ---
+    # The full resolution chain, in order, per configured API key:
+    #   gemini_primary_model -> gemini_fallback_model -> groq_fallback_model
+    #   -> groq_fallback_model_2 -> gemini_tertiary_model
+    # Before attempting each hop, the gateway checks app/rate_limits.py
+    # against that account's actual free-tier quota (logged usage in
+    # llm_calls) and skips straight past any hop that's currently exhausted,
+    # rather than waiting for the provider to reject it with a 429.
     gemini_api_key: str | None = None
     # Optional fallback provider. SPEC names "Gemini 2.5 Pro or OpenAI" here —
     # Groq replaces OpenAI by direct request: it's OpenAI-API-compatible (same
     # SDK, different base_url — see providers.py) and genuinely free (no card,
     # resets daily) — unlike an earlier Kimi/Moonshot AI attempt at this slot,
-    # which turned out to need a paid recharge. Free-tier rate limits are real
-    # (30 RPM / 1K RPD / 12K TPM on the default model) — fine for a rarely-
-    # invoked fallback, not for production load. Leave empty and the fallback
+    # which turned out to need a paid recharge. Leave empty and the fallback
     # becomes GEMINI_FALLBACK_MODEL (same provider, more capable model).
     groq_api_key: str | None = None
     # SPEC names gemini-2.5-flash/pro, but 2.5-flash now 404s for new API keys
@@ -53,16 +58,21 @@ class Settings(BaseSettings):
     # retries without thinking config if a model rejects it).
     gemini_primary_model: str = "gemini-3.5-flash"
     gemini_fallback_model: str = "gemini-3.6-flash"
+    # Last-resort Gemini hop, tried after both Groq models — a third distinct
+    # Flash-tier model in case 3.5/3.6 are both rate-limited or down. On this
+    # account's free tier it shares the same tight RPM=5/TPM=250K/RPD=20 quota
+    # as the other two, so it's most useful when 3.5/3.6 are exhausted for
+    # the day but the daily quota resets are staggered.
+    gemini_tertiary_model: str = "gemini-3-flash-preview"
 
     # Thinking tokens bill as output and delay the first token. 0 disables
     # thinking; set to None to leave the model's default in place.
     gemini_thinking_budget: int | None = 0
-    # $0 on the free tier — confirmed against
-    # https://console.groq.com/docs/rate-limits. Well-established 70B dense
-    # model with more free-tier token headroom (12K TPM) than Groq's other
-    # free models, which matters for RAG prompts carrying several chunks plus
-    # conversation history.
-    groq_fallback_model: str = "llama-3.3-70b-versatile"
+    # llama-3.3-70b-versatile was removed from Groq's free tier (no longer
+    # listed at console.groq.com/docs/rate-limits) — these are its current
+    # free-tier replacements, tried in order. $0 on the free tier either way.
+    groq_fallback_model: str = "openai/gpt-oss-120b"
+    groq_fallback_model_2: str = "openai/gpt-oss-20b"
     llm_timeout_seconds: float = 30.0
 
     # --- Auth (Google sign-in) ---

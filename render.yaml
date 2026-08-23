@@ -95,9 +95,17 @@ services:
         value: "0"
       - key: GEMINI_FALLBACK_MODEL
         value: gemini-3.6-flash
-      # $0 on the free tier (console.groq.com/docs/rate-limits).
+      # Last-resort Gemini hop, tried after both Groq models — see
+      # app/rate_limits.py for the full chain order and quota-check logic.
+      - key: GEMINI_TERTIARY_MODEL
+        value: gemini-3-flash-preview
+      # llama-3.3-70b-versatile was removed from Groq's free tier; these are
+      # its current replacements (console.groq.com/docs/rate-limits), $0 on
+      # the free tier either way.
       - key: GROQ_FALLBACK_MODEL
-        value: llama-3.3-70b-versatile
+        value: openai/gpt-oss-120b
+      - key: GROQ_FALLBACK_MODEL_2
+        value: openai/gpt-oss-20b
       - key: LLM_TIMEOUT_SECONDS
         value: "30"
       - key: EMBEDDING_MODEL
