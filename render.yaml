@@ -17,40 +17,15 @@ services:
     rootDir: backend
     healthCheckPath: /health
 
-    # Install CPU-only torch (see requirements-render.txt), then pre-download
-    # the embedding model during BUILD so it is baked into the image. Without
-    # this, every cold start re-downloads ~90 MB from HuggingFace before the
-    # service can serve traffic.
     buildCommand: |
       pip install --upgrade pip
-      pip install -r requirements-render.txt
-      python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+      pip install -r requirements-ingest.txt
 
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.7"
-
-      # Where sentence-transformers caches the model. Must match between the
-      # build step above and runtime, or the pre-download is wasted.
-      - key: HF_HOME
-        value: /opt/render/project/.cache/huggingface
-
-      # BLAS/OpenMP default to one thread per CPU core, and each thread
-      # pre-allocates its own buffers on first use — wasted overhead on the
-      # free tier's 512MB ceiling, since embed calls are already serialized
-      # (see embeddings.py) and MiniLM inference takes milliseconds either
-      # way. Must be set before the process starts: these libraries read
-      # them at load time, before torch.set_num_threads() could apply.
-      - key: OMP_NUM_THREADS
-        value: "1"
-      - key: OPENBLAS_NUM_THREADS
-        value: "1"
-      - key: MKL_NUM_THREADS
-        value: "1"
-      - key: TOKENIZERS_PARALLELISM
-        value: "false"
 
       # --- Secrets / environment-specific: set these in the dashboard ---
       # Neon pooler-free connection string, e.g.
@@ -108,10 +83,12 @@ services:
         value: openai/gpt-oss-20b
       - key: LLM_TIMEOUT_SECONDS
         value: "30"
+      # Hosted (Gemini) embeddings — see app/embeddings.py. 768 is a
+      # Matryoshka-truncated dimension (native output is 3072).
       - key: EMBEDDING_MODEL
-        value: all-MiniLM-L6-v2
+        value: gemini-embedding-001
       - key: EMBEDDING_DIM
-        value: "384"
+        value: "768"
       - key: CHUNK_SIZE_TOKENS
         value: "500"
       - key: CHUNK_OVERLAP_TOKENS

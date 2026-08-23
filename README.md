@@ -58,9 +58,8 @@ kind you can debug at 2am from a database table.
 │  /notebooks/{id}/chat  ── the RAG flow ──┐        │
 │                                          │        │
 │  ┌───────────────────────────────────────▼─────┐  │
-│  │ 1. embed query      sentence-transformers   │  │
-│  │                     all-MiniLM-L6-v2 (384d) │  │
-│  │                     ── runs in-process ──   │  │
+│  │ 1. embed query      gemini-embedding-001    │  │
+│  │                     hosted API, 768d        │  │
 │  │ 2. top-k=5 cosine search  (pgvector <=>)    │  │
 │  │ 3. build prompt, chunks labelled [S1]..[S5] │  │
 │  │ 4. gateway.call_llm() ───────────┐          │  │
@@ -71,19 +70,22 @@ kind you can debug at 2am from a database table.
 │  │  cache lookup ──hit──▶ return (~2ms, $0.00)  │ │
 │  │       │ miss                                 │ │
 │  │       ▼                                      │ │
-│  │  primary ──429/5xx/timeout──▶ fallback       │ │
-│  │       │ ok                        │ ok       │ │
-│  │       ▼                           ▼          │ │
+│  │  rate-limit-filtered chain, walked in order: │ │
+│  │  gemini-3.5 → gemini-3.6 → groq×2 → gemini-3 │ │
+│  │  each hop skipped pre-emptively if that      │ │
+│  │  model's own RPM/TPM/RPD is already exhausted│ │
+│  │       │ first with headroom + succeeds       │ │
+│  │       ▼                                      │ │
 │  │  write cache + log llm_calls row             │ │
-│  │       │ both fail                            │ │
+│  │       │ every hop exhausted or fails         │ │
 │  │       ▼  log error row, raise GatewayError   │ │
 │  └───────────────┬──────────────────────────────┘ │
 └──────────────────┼────────────────────────────────┘
                    │                    │
                    ▼                    ▼
       ┌────────────────────┐   ┌──────────────────┐
-      │ Postgres + pgvector│   │  Gemini / Groq   │
-      │      (Neon)        │   │   HTTPS APIs     │
+      │ Postgres + pgvector│   │ Gemini / Groq /  │
+      │      (Neon)        │   │ Gemini embeddings│
       │                    │   └──────────────────┘
       │ notebooks  sources │
       │ chunks     chat_messages
@@ -92,9 +94,12 @@ kind you can debug at 2am from a database table.
 ```
 
 **Ingestion** runs as a FastAPI background task: parse (`pypdf` / `python-docx` /
-`trafilatura`) → chunk (~500 tokens, 50 overlap) → embed locally → store. The
-source row flips `pending → processing → ready|failed`, and the UI polls until
-it settles.
+`trafilatura`) → chunk (~500 tokens, 50 overlap) → embed via Gemini's hosted API
+→ store. At most `MAX_CONCURRENT_INGESTIONS` (default 2) run at once — a
+memory-constrained host (e.g. Render's free tier) can't parse/embed unbounded
+sources in parallel — so a burst of adds queues rather than running together.
+The source row flips `pending → processing → ready|failed`, and the UI polls
+until it settles.
 
 **Streaming.** `POST /notebooks/{id}/chat/stream` emits Server-Sent Events —
 `token` deltas as the model generates, then one `done` event carrying the exact
@@ -152,14 +157,18 @@ pip install -r requirements-dev.txt
 python -m pytest -q      # run via `python -m`, not a bare `pytest`, so cwd is on sys.path
 ```
 
-47 tests, no network calls, real local Postgres (deliberately not mocked — the
-gateway's value IS what it writes to the database). `tests/test_gateway.py` is
-the core suite: fake providers exercise every SPEC branch — cache hit skips
-the provider, a retryable failure falls over, a fatal error never retries, a
-mid-stream failure raises instead of splicing two answers together, and the
-semantic cache's 0.97 threshold behaves as measured. `test_rag.py` and
-`test_websearch.py` cover parsing; `test_api.py` smoke-tests routing and
-ownership in auth-disabled mode.
+50 tests, no network calls, real local Postgres (deliberately not mocked — the
+gateway's value IS what it writes to the database). Embeddings are mocked
+with a deterministic, network-free stand-in (`tests/conftest.py`'s
+`fake_embeddings`) — bag-of-words hashing, so paraphrases land at cosine
+similarity 1.0 and unrelated questions land far apart, exactly what the
+semantic-cache tests need without ever calling the real Gemini embedding API.
+`tests/test_gateway.py` is the core suite: fake providers exercise every SPEC
+branch — cache hit skips the provider, a retryable failure falls over to the
+next hop in the chain, a rate-limited hop is skipped without being called, a
+fatal error never retries, a mid-stream failure raises instead of splicing
+two answers together. `test_rag.py` and `test_websearch.py` cover parsing;
+`test_api.py` smoke-tests routing and ownership in auth-disabled mode.
 
 ## Tech Stack
 
@@ -168,8 +177,8 @@ ownership in auth-disabled mode.
 | Backend | Python 3.12, FastAPI, SQLAlchemy 2, Alembic |
 | Frontend | Next.js 16 (App Router), TypeScript, Tailwind v4 |
 | Database | Postgres 16 + `pgvector` (HNSW, `vector_cosine_ops`) |
-| Embeddings | `sentence-transformers` / `all-MiniLM-L6-v2`, local, 384-dim |
-| LLM | Gemini (primary + fallback), Groq adapter (OpenAI-API-compatible, free tier) |
+| Embeddings | `gemini-embedding-001`, hosted, 768-dim (Matryoshka-truncated from 3072) |
+| LLM | Gemini (3-hop chain) + Groq adapter (OpenAI-API-compatible, free tier), rate-limit-aware fallback |
 
 ## Local setup
 
@@ -184,8 +193,8 @@ docker exec notebooklm_rag_db psql -U rag -d rag \
 # 2. Backend
 cd backend
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-ingest.txt   # includes torch; ~1.3 GB installed
-cp .env.example .env                     # fill in GEMINI_API_KEY
+pip install -r requirements-ingest.txt
+cp .env.example .env                     # fill in GEMINI_API_KEY (also used for embeddings)
 alembic upgrade head
 uvicorn app.main:app --reload            # http://localhost:8000
 
@@ -204,8 +213,9 @@ curl -X POST http://localhost:8000/notebooks \
   -H 'Content-Type: application/json' -d '{"title":"Demo"}'
 ```
 
-> The first request after boot loads the embedding model (~10 s). The app warms
-> it during FastAPI startup so no user request pays that cost.
+> Embeddings are a hosted API call now (`gemini-embedding-001`) — no local
+> model to warm, so there's no first-request cold-load cost for it. Chat
+> latency is dominated by the LLM provider call instead.
 
 ## Deploying
 
@@ -219,74 +229,66 @@ every secret is marked `sync: false` and set in the provider dashboard.
 
 These are real, measured constraints — not hypotheticals.
 
-**The fallback provider's free tier has real rate limits.** Groq's free tier
-is genuinely free (no card, resets daily) — but caps out at 30 requests/min,
-1,000/day, and 12,000 tokens/min on the default model. Fine for a rarely-
-invoked fallback on a portfolio-scale app; the first thing to break under any
-real production load. An earlier attempt used Kimi (Moonshot AI) in this slot
-— also OpenAI-API-compatible, but it turned out to require a paid recharge
-despite looking free, which is why Groq replaced it.
+**Every model in the LLM chain has real, tight rate limits.** This account's
+Gemini free tier caps every Flash model (3.5, 3.6, 3-flash-preview) at just
+5 requests/min and **20/day each** — confirmed from the account dashboard, not
+the (unpublished) public docs. Groq's `openai/gpt-oss-120b`/`20b` fare better
+(30 RPM, 1,000/day, 8,000 TPM) but replaced `llama-3.3-70b-versatile` after it
+was removed from Groq's free tier mid-project. `app/rate_limits.py` checks
+each hop's own usage (from `llm_calls`) before attempting it and skips
+straight to the next one if exhausted, rather than waiting on a 429 — but
+with a 5-hop chain and Gemini's 20/day ceiling per model, a busy day can
+genuinely exhaust every hop; the gateway surfaces that as a 429 to the client
+rather than a generic failure.
 
 **Free-tier cold starts compound.** Render free services spin down after ~15
-minutes idle; the next request pays a container start *plus* loading the
-embedding model into memory. Neon's compute also scales to zero. A first
-request to a cold stack can take 30–60 s, and the transparency panel will
-honestly report that latency. Warm requests are ~3–14 s, dominated by the
-provider call.
+minutes idle. Neon's compute also scales to zero. A first request to a cold
+stack can take 30–60 s, and the transparency panel will honestly report that
+latency. Warm requests are ~3–14 s, dominated by the provider call.
 
-**Concurrent embedding calls are serialized on purpose.** Two threads calling
-`SentenceTransformer.encode()` at once reproducibly **segfaults the whole
-process** on this machine's PyTorch MPS (Apple GPU) backend — confirmed by
-direct reproduction, not a guess. Multi-file upload and multi-URL add both
-fire several ingestion background tasks at once, and a chat request's query
-embedding can already overlap with an in-flight ingestion — all of which call
-into the same shared model instance. `app/embeddings.py` wraps every
-`model.encode()` call in a lock (`_encode_lock`) so calls queue instead of
-racing. The cost is negligible (MiniLM inference is milliseconds) and the
-alternative is a crashed server, so this is a permanent fix, not a workaround
-to revisit.
-
-**Local embeddings are a real trade-off.** `all-MiniLM-L6-v2` costs nothing per
-call, sends no document text to a third party, and is fast enough on CPU — but
-it pulls PyTorch into the deployment (~529 MB installed, and the default Linux
-wheel drags in ~2 GB of CUDA packages you must actively opt out of; see
-`requirements-render.txt`). It also fits awkwardly in Render's 512 MB free
-tier — that's the most likely thing to break on a free deploy. And 384-dim
-MiniLM retrieves noticeably worse than a larger embedding model on nuanced
-queries.
+**Embeddings are hosted, not local — a deliberate reversal mid-project.**
+SPEC originally chose local embeddings (`sentence-transformers`/MiniLM): no
+per-call cost, no document text sent to a third party. That held until
+production confirmed otherwise — torch's baseline memory footprint plus a
+single typical source's parse/chunk buffers exceeded Render's free 512MB
+ceiling (`SIGKILL`/exit 137, "Ran out of memory") on a plain 19-page PDF, no
+concurrency involved. Switched to `gemini-embedding-001` (same API key as
+chat, 100 RPM / 30,000 TPM / 1,000 RPD free tier), which removes the whole
+torch/MiniLM baseline at the cost of a network dependency and that quota. See
+`app/embeddings.py`.
 
 **Retrieval is single-shot.** Top-k=5 cosine, no reranking, no query rewriting,
 no multi-hop. A question whose answer is split across seven chunks will get five
 of them.
 
-**The semantic cache only catches near-paraphrases.** MiniLM similarity here is
-dominated by lexical overlap, not question intent, and the safe threshold is
-narrow. Measured against *"What is retrieval-augmented generation?"*:
+**The semantic (paraphrase) cache is disabled by default, pending
+remeasurement.** Its 0.97 threshold was tuned specifically for MiniLM's
+embedding space; switching to `gemini-embedding-001` invalidated that
+number — a quick check found "what is retrieval augmented generation" (want
+hit, scored 0.9804) and "How does retrieval-augmented generation **work**?"
+(a different question, want miss, scored 0.9749) only 0.0055 apart, too thin
+to trust from one sample pair. Exact `cache_key` matching (identical prompt
+text) is unaffected and still fully active — only the paraphrase-matching
+path is off (`SEMANTIC_CACHE_ENABLED=false`) until it's properly remeasured
+against the new embedding space.
 
-| Similarity | Query | Wanted |
-|---|---|---|
-| 0.976 | "what is retrieval augmented generation" | hit |
-| 0.972 | "Can you explain what retrieval-augmented generation is?" | hit |
-| **0.965** | **"How does retrieval-augmented generation work?"** | **miss** — different question |
-| 0.848 | "Explain retrieval-augmented generation" | (misses) |
-| 0.13 | "What's RAG?" | (misses — MiniLM doesn't equate the acronym) |
+**Semantic hits (once re-enabled) would ignore conversation history.** The
+exact-match key covers the full prompt including replayed turns, but the
+semantic key is `(chunks, query embedding)` only — including history would
+make the feature dead code, since every turn has a different history. The
+trade-off is that a paraphrased *follow-up* whose meaning depends on the
+conversation could match an earlier one asked in a different context.
 
-Only 0.007 separates the last wanted hit from the first wanted miss, so the
-threshold sits at 0.97 and anything looser starts serving wrong answers. It
-reliably absorbs punctuation and light rewording; it will not match acronyms. A
-larger or instruction-tuned embedding model would widen that margin.
-
-**Semantic hits ignore conversation history.** The exact-match key covers the
-full prompt including replayed turns, but the semantic key is
-`(chunks, query embedding)` only — including history would make the feature dead
-code, since every turn has a different history. The trade-off is that a
-paraphrased *follow-up* whose meaning depends on the conversation could match an
-earlier one asked in a different context.
-
-**A retired primary model does not trigger fallback.** Per spec, failover fires
-on timeout/5xx/rate-limit. A `404 model not found` is classified fatal, so it
-surfaces as an error instead of failing over — which is exactly what happened
-when Google retired `gemini-2.5-flash` for new API keys mid-project.
+**A model-config-fatal error does not trigger fallback.** Per spec, failover
+fires on timeout/5xx/rate-limit. A `404 model not found` or `400 bad request`
+is classified fatal, so it surfaces as an error instead of failing over —
+which is exactly what happened when Google retired `gemini-2.5-flash` for new
+API keys mid-project (now excluded from the live chain entirely, since it's a
+confirmed permanent 404 rather than a rate limit). This is arguably too broad
+for a multi-hop chain — a 401/404 is a provider-config problem, not a
+prompt problem, and could reasonably fall through to the next hop instead of
+aborting — but is unchanged from the original single-fallback design pending
+a decision on whether to split that distinction out.
 
 **Single-user by design.** No auth, no tenancy, no rate limiting. Anyone who can
 reach the API can read and write every notebook. See SPEC.md "Non-goals."
@@ -304,8 +306,8 @@ reach the API can read and write every notebook. See SPEC.md "Non-goals."
 │   │   ├── models.py       ← SQLAlchemy models (mirrors SPEC data model)
 │   │   └── routers/        ← notebooks, sources, chat
 │   ├── alembic/            ← migrations (creates the pgvector extension)
-│   ├── requirements-ingest.txt   ← local dev (torch from PyPI)
-│   └── requirements-render.txt   ← production (CPU-only torch)
+│   ├── embeddings.py       ← gemini-embedding-001, hosted (no local model)
+│   └── requirements-ingest.txt   ← local dev + production alike
 ├── frontend/src/
 │   ├── app/                ← App Router pages
 │   ├── components/         ← SourcesPanel, ChatPanel, citations, transparency

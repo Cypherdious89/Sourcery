@@ -88,9 +88,15 @@ class Settings(BaseSettings):
     search_result_count: int = 8
     search_timeout_seconds: float = 10.0
 
-    # --- Embeddings (local, no API calls) ---
-    embedding_model: str = "all-MiniLM-L6-v2"
-    embedding_dim: int = 384
+    # --- Embeddings (hosted — Gemini, same GEMINI_API_KEY as chat) ---
+    # Was local (sentence-transformers/MiniLM) until torch's baseline memory
+    # footprint was confirmed in production to exceed Render's free 512MB
+    # ceiling for a single typical source, no concurrency involved. Free
+    # tier: 100 RPM / 30,000 TPM / 1,000 RPD (aistudio.google.com/rate-limit).
+    # 768 is a Matryoshka-truncated dimension (native output is 3072) —
+    # smaller storage/index cost while preserving ranking quality.
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dim: int = 768
 
     # --- RAG parameters ---
     chunk_size_tokens: int = 500
@@ -103,20 +109,20 @@ class Settings(BaseSettings):
 
     # --- Semantic cache ---
     # Lets a paraphrase reuse a cached answer when retrieval returned the same
-    # chunks. Threshold is cosine similarity on the MiniLM query embedding.
+    # chunks. Threshold is cosine similarity on the query embedding.
     #
-    # 0.97 is deliberately tight, and measured rather than guessed. Against
-    # "What is retrieval-augmented generation?":
-    #     0.976  "what is retrieval augmented generation"      (want a hit)
-    #     0.972  "Can you explain what RAG is?" (spelled out)  (want a hit)
-    #     0.965  "How does retrieval-augmented generation work?" (want a MISS —
-    #            different question, deserves a different answer)
-    #     0.848  "Explain retrieval-augmented generation"       (misses)
-    #     0.13   "What's RAG?" — MiniLM does not equate the acronym
-    # Only 0.007 separates the last wanted hit from the first wanted miss, so
-    # anything looser starts serving wrong answers. In practice this catches
-    # punctuation/whitespace/minor rewording, not intent changes.
-    semantic_cache_enabled: bool = True
+    # OFF by default since switching embeddings from local MiniLM to
+    # gemini-embedding-001: the 0.97 threshold below was tuned specifically
+    # for MiniLM's embedding space and does NOT transfer. A quick check
+    # against gemini-embedding-001 (RETRIEVAL_QUERY, 768-dim) found the
+    # margin unsafe to guess at — "what is retrieval augmented generation"
+    # (want HIT) scored 0.9804, while "How does retrieval-augmented
+    # generation WORK?" (a genuinely different question, want MISS) scored
+    # 0.9749 — only 0.0055 apart, from a single sample pair, too thin to
+    # trust without a proper multi-pair measurement against this model.
+    # Exact cache_key matching (identical prompt text) is unaffected and
+    # still fully active regardless of this setting.
+    semantic_cache_enabled: bool = False
     semantic_cache_threshold: float = 0.97
 
     # --- Ingestion ---

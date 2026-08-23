@@ -123,18 +123,22 @@ configures itself.
   | `GOOGLE_CLIENT_ID` | leave empty for now; comes back in step 5 if you want sign-in | optional |
   | `TAVILY_API_KEY` | from [app.tavily.com](https://app.tavily.com/) if you want the "search the web" source-add feature | optional |
 
-  > **`GROQ_API_KEY` is the recommended fallback — it's actually free**, no
-  > card, resets daily (unlike an earlier Kimi/Moonshot AI attempt at this
-  > slot, which needed a paid recharge). Rate limits are real, though: 30
-  > RPM / 1K RPD / 12K TPM on the default model — plenty for a low-traffic
-  > portfolio deploy, not for production load. If the key is invalid or the
-  > account somehow can't serve a request, the gateway prefers it as the
-  > fallback, so that turns every failover into a hard 502 instead of
-  > retrying Gemini — same as any misconfigured fallback key.
+  > **`GROQ_API_KEY` fills two hops in the fallback chain** — it's actually
+  > free, no card, resets daily (unlike an earlier Kimi/Moonshot AI attempt
+  > at this slot, which needed a paid recharge, and `llama-3.3-70b-versatile`
+  > before it, which Groq later dropped from its free tier). Current models:
+  > `openai/gpt-oss-120b` then `openai/gpt-oss-20b`, each 30 RPM / 1K RPD /
+  > 8K TPM / 200K TPD. This account's Gemini Flash models are tighter still —
+  > 5 RPM / 20 RPD each — so `app/rate_limits.py` proactively skips any hop
+  > that's out of quota rather than waiting for a 429. If the Groq key is
+  > invalid, that specific hop raises a fatal (not retryable) error, which
+  > per the current design aborts the *whole* chain rather than continuing
+  > to the next hop — same failure mode as before, just now inside a 5-hop
+  > chain instead of a single fallback.
 
-- [ ] Deploy. First build takes ~5–10 minutes: it installs CPU-only PyTorch
-  (`requirements-render.txt`) and pre-downloads the MiniLM embedding model so
-  cold starts don't re-fetch it from HuggingFace.
+- [ ] Deploy. Build installs `requirements-ingest.txt` — no local ML model,
+  no PyTorch (embeddings are a hosted Gemini API call now — see
+  `app/embeddings.py` — so nothing to pre-download or warm at boot).
 - [ ] Verify: `curl https://<your-service>.onrender.com/health` → `{"status":"ok"}`
 - [ ] Note your Render URL — Vercel needs it next.
 
@@ -142,9 +146,9 @@ configures itself.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Build OOM / disk exceeded | CPU-torch pin not applied | Confirm the build command uses `requirements-render.txt`, not `requirements-ingest.txt` |
-| Boot OOM (`Ran out of memory`) | Free tier is 512 MB; torch + MiniLM sit close to that ceiling — the single most likely failure on this stack | Upgrade to the 1 GB Starter instance, or swap to a hosted embedding API (bigger change — SPEC deliberately chose local embeddings) |
+| `429`/rate-limited chat responses | This account's Gemini Flash models cap at 20 requests/**day** each — genuinely easy to exhaust with a 5-hop chain on a busy day | Check `/stats` for `by_model` counts, or wait for the daily reset; not a bug |
 | First request after idle is slow | Expected — free services spin down after ~15 min idle | None needed; cold start is 30–60 s |
+| Source ingestion OOMs (`Ran out of memory`, exit 137) | Parsing (not embedding, which is hosted now) still runs in-process — a burst of concurrent large sources can exceed 512MB | `MAX_CONCURRENT_INGESTIONS` (default 2) already bounds this; lower it further, or upgrade to the 1GB Starter instance |
 
 ---
 

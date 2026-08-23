@@ -33,8 +33,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
-# --- Embedding dimension: all-MiniLM-L6-v2 produces 384-dim vectors. ---
-EMBEDDING_DIM = 384
+# --- Embedding dimension: gemini-embedding-001, truncated to 768. Keep in
+# sync with app/config.py's embedding_dim and the vector column type in
+# alembic/versions/0006_gemini_embeddings.py. ---
+EMBEDDING_DIM = 768
 
 
 # --------------------------------------------------------------------------- #
@@ -162,6 +164,10 @@ class Source(Base):
         nullable=False,
         server_default=SourceStatus.pending.value,
     )
+    # Coarse checkpoint progress (0-100) through parse -> chunk -> embed ->
+    # store, updated as ingestion.py advances. 0 while queued (pending) or
+    # untouched; only climbs once processing actually starts.
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     notebook: Mapped[Notebook] = relationship(back_populates="sources")
     chunks: Mapped[list[Chunk]] = relationship(

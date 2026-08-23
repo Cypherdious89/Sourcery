@@ -1,7 +1,6 @@
 # Ingestion + embeddings + LLM provider SDKs.
-# Kept separate from requirements.txt because sentence-transformers pulls in
-# torch (a large download). Install these when working on the RAG pipeline /
-# gateway phases:  pip install -r requirements-ingest.txt
+# Install these when working on the RAG pipeline / gateway phases:
+#   pip install -r requirements-ingest.txt
 -r requirements.txt
 
 # Document parsing (see SPEC "RAG Flow")
@@ -9,8 +8,11 @@ pypdf>=5.1,<6
 python-docx>=1.1,<2
 trafilatura>=1.12,<2
 
-# Local embeddings — all-MiniLM-L6-v2 (384-dim), no embedding API calls
-sentence-transformers>=3.3,<4
+# Embeddings (gemini-embedding-001, hosted — see app/embeddings.py) reuse the
+# google-genai SDK below; no separate embeddings dependency. Was local
+# (sentence-transformers, which pulls in torch — a large download) until
+# torch's memory footprint was confirmed in production to exceed Render's
+# free-tier 512MB ceiling for a single typical source.
 
 # LLM providers routed through the gateway
 # Floor of 1.10 because ThinkingConfig.thinking_budget (see providers.py) was
