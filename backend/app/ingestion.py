@@ -54,6 +54,33 @@ PROGRESS_EMBED_DONE = 90
 PROGRESS_READY = 100
 
 
+def classify_ingestion_failure(
+    exc: Exception, *, stage: str | None = None
+) -> tuple[str, str]:
+    """Map an internal ingestion exception to a safe UI-facing payload.
+
+    Exception messages can include URLs, file paths, or provider internals, so
+    they remain in server logs only. The browser gets a stable error code plus
+    a short recovery-oriented message.
+    """
+    detail = str(exc).lower()
+    if "no extractable text" in detail or "no main content extracted" in detail:
+        return "EMPTY_CONTENT", "No extractable text was found in this source."
+    if "fetch url" in detail or "scrape url" in detail:
+        return (
+            "URL_FETCH_FAILED",
+            "The URL could not be fetched. Check that it is public and try again.",
+        )
+    if isinstance(exc, ParseError):
+        return "PARSE_FAILED", "This source could not be parsed."
+    if stage == "embedding":
+        return (
+            "EMBEDDING_FAILED",
+            "Embeddings could not be created right now. Please retry.",
+        )
+    return "INGESTION_FAILED", "The source could not be processed. Please try again."
+
+
 def ingest_source(
     source_id: uuid.UUID,
     notebook_id: uuid.UUID,
@@ -128,9 +155,12 @@ def _ingest_source(
 
         source.status = SourceStatus.processing
         source.progress = PROGRESS_STARTED
+        source.error_code = None
+        source.error_message = None
         db.commit()
 
         # 1. Parse -> plain text
+        stage = "parsing"
         url_title: str | None = None
         if source_type == SourceType.pdf:
             assert file_bytes is not None
@@ -149,6 +179,7 @@ def _ingest_source(
         db.commit()
 
         # 2. Chunk (~500 tokens, ~50 overlap; word-count approximation)
+        stage = "chunking"
         pieces = chunk_text(text)
         if not pieces:
             raise ParseError("No chunks produced from source content")
@@ -157,6 +188,7 @@ def _ingest_source(
         db.commit()
 
         # 3. Embed (Gemini, hosted — see app/embeddings.py)
+        stage = "embedding"
         def _on_batch(done: int, total: int) -> None:
             span = PROGRESS_EMBED_DONE - PROGRESS_EMBED_START
             source.progress = PROGRESS_EMBED_START + int(span * done / total)
@@ -169,6 +201,7 @@ def _ingest_source(
         db.commit()
 
         # 4. Store, scoped to notebook_id + source_id
+        stage = "storing"
         db.execute(delete(Chunk).where(Chunk.source_id == source_id))
         db.add_all(
             [
@@ -207,6 +240,9 @@ def _ingest_source(
             source = db.get(Source, source_id)
             if source is not None:
                 source.status = SourceStatus.failed
+                source.error_code, source.error_message = classify_ingestion_failure(
+                    exc, stage=stage
+                )
                 db.commit()
         except Exception:  # noqa: BLE001
             db.rollback()

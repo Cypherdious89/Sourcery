@@ -108,7 +108,7 @@ erDiagram
 |---|---|
 | users | Google subject is unique because it is the stable identity. With auth disabled, fixed local-dev user owns local data. |
 | notebooks | User ID is the current authorization boundary. The ownership helper returns 404 rather than 403 for foreign records. |
-| sources | Type is pdf, docx, or url. Status moves pending → processing → ready or failed; progress is a coarse 0–100 checkpoint. |
+| sources | Type is pdf, docx, or url. Status moves pending → processing → ready or failed; progress is a coarse 0–100 checkpoint. Failed sources also retain a safe error code/message for the UI; raw exception detail stays in backend logs. |
 | chunks | Stores text, a 768-dimensional Gemini embedding, original character range, and source/notebook foreign keys. The notebook key makes the retrieval predicate direct. |
 | chat_messages | Persists both user and assistant turns; assistant rows store cited chunk UUIDs. |
 | llm_calls | Writes one row for every gateway outcome—including zero-cost cache hits and errors—and links to the assistant message after that message exists. |
@@ -186,9 +186,11 @@ The ingestion pipeline is:
 A process-local semaphore bounds parallel ingestion, protecting a small host
 from burst memory pressure. Every terminal path runs garbage collection and,
 on Linux, malloc_trim(0) to return parsing memory to the OS. Exceptions roll
-back the active transaction and mark the source failed. When a still-untitled
-notebook receives its first ready source, the task derives its name from the
-filename or web-page title.
+back the active transaction and mark the source failed with a stable safe
+code/message, such as EMPTY_CONTENT or URL_FETCH_FAILED. Raw exception text
+is logged but never sent to the browser. When a still-untitled notebook
+receives its first ready source, the task derives its name from the filename
+or web-page title.
 
 ## 6. RAG and citations
 
@@ -330,4 +332,3 @@ python -m pytest -q
 Deferred designs for search, per-source summary, chat threads, collaboration,
 durable source versions, retrieval evaluation, and tenant controls are in
 [FUTURE_SCOPE.md](FUTURE_SCOPE.md).
-

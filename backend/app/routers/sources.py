@@ -212,6 +212,8 @@ def retry_source(
 
     source.status = SourceStatus.pending
     source.progress = 0
+    source.error_code = None
+    source.error_message = None
     db.commit()
     db.refresh(source)
 

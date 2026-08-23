@@ -61,6 +61,8 @@ class SourceOut(BaseModel):
     original_name_or_url: str
     status: SourceStatus
     progress: int
+    error_code: str | None
+    error_message: str | None
     ingested_at: datetime
 
 

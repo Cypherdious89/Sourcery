@@ -25,6 +25,9 @@ export interface Source {
   status: SourceStatus;
   /** 0-100, coarse checkpoint progress through parse/chunk/embed/store. */
   progress: number;
+  /** Safe backend-defined reason when ingestion reaches failed status. */
+  error_code: string | null;
+  error_message: string | null;
   ingested_at: string;
 }
 

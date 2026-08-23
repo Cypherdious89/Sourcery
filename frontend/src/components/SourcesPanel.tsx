@@ -170,9 +170,7 @@ export function SourcesPanel({ state }: { state: UseSources }) {
               </span>
               {s.status === "failed" && (
                 <span className="mt-0.5 block text-[10px] text-red-600 dark:text-red-400">
-                  {s.type === "url"
-                    ? "Ingestion failed — retry, or check the backend logs."
-                    : "Ingestion failed — delete and re-upload the file."}
+                  Ingestion failed [{s.error_code ?? "INGESTION_FAILED"}] — {s.error_message ?? "The source could not be processed."}
                 </span>
               )}
               {s.status === "processing" && s.progress > 0 && (

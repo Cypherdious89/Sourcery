@@ -123,6 +123,37 @@ def test_source_add_list_delete(client):
         client.delete(f"/notebooks/{nb_id}")
 
 
+def test_failed_source_response_includes_safe_failure_details(client, db):
+    """The source API must expose the safe failure payload used by the UI."""
+    from app.models import Source, SourceStatus, SourceType
+
+    created = client.post("/notebooks", json={"title": "failure details"})
+    nb_id = created.json()["id"]
+    try:
+        source = Source(
+            notebook_id=uuid.UUID(nb_id),
+            type=SourceType.pdf,
+            original_name_or_url="scanned.pdf",
+            status=SourceStatus.failed,
+            progress=0,
+        )
+        source.error_code = "EMPTY_CONTENT"
+        source.error_message = "No extractable text was found in this source."
+        db.add(source)
+        db.commit()
+        db.refresh(source)
+
+        response = client.get(f"/notebooks/{nb_id}/sources/{source.id}")
+
+        assert response.status_code == 200
+        assert response.json()["error_code"] == "EMPTY_CONTENT"
+        assert response.json()["error_message"] == (
+            "No extractable text was found in this source."
+        )
+    finally:
+        client.delete(f"/notebooks/{nb_id}")
+
+
 def test_retry_requeues_a_failed_url_source(client, db):
     from app.models import Source, SourceStatus
 
