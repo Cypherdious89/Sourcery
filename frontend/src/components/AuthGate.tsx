@@ -7,9 +7,8 @@ import {
   setAuthTokenGetter,
   setUnauthorizedHandler,
 } from "@/lib/api";
-import { Button } from "./Button";
 import { Header } from "./Header";
-import { IconGoogle, IconSparkles } from "./icons";
+import { LandingPage } from "./LandingPage";
 
 /**
  * Gates the app on Google sign-in — but only when the backend says so.
@@ -57,29 +56,7 @@ function SignedIn({ children }: { children: React.ReactNode }) {
   if (status === "loading") return <Loading />;
 
   if (!session) {
-    return (
-      <div className="flex flex-1 items-center justify-center p-6">
-        <div className="w-full max-w-sm rounded-2xl border border-line bg-surface p-8 text-center shadow-sm">
-          <span className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-accent text-accent-fg">
-            <IconSparkles className="h-5 w-5" />
-          </span>
-          <h1 className="mt-4 text-lg font-semibold text-fg">
-            NotebookLM RAG Gateway
-          </h1>
-          <p className="mt-1.5 text-sm text-muted">
-            Sign in to create notebooks and chat with your sources.
-          </p>
-          <Button
-            variant="primary"
-            className="mt-6 w-full"
-            onClick={() => signIn("google")}
-          >
-            <IconGoogle className="h-4 w-4" />
-            Continue with Google
-          </Button>
-        </div>
-      </div>
-    );
+    return <LandingPage onSignIn={() => signIn("google")} />;
   }
 
   return (
